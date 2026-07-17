@@ -1,0 +1,26 @@
+{
+  "deliveryPlatforms": ["美团", "饿了么"],
+  "jdPlatforms": ["京东", "京东外卖", "京东秒送"],
+  "socialPlatforms": {
+    "dianping": {"label": "大众点评", "sheetNames": ["大众", "大众点评"]},
+    "weibo": {"label": "微博", "sheetNames": ["微博"]},
+    "xiaohongshu": {"label": "小红书", "sheetNames": ["小红书"]},
+    "douyin": {"label": "抖音", "sheetNames": ["抖音"]},
+    "bilibili": {"label": "B站", "sheetNames": ["B站", "哔哩哔哩"]}
+  },
+  "rawColumns": {
+    "platform": ["平台"],
+    "brand": ["品牌"],
+    "store": ["店铺名称", "门店", "门店名称"],
+    "category": ["分类描述", "分类"],
+    "product": ["宝贝名称", "商品名称", "产品名称", "新品"],
+    "monthlySales": ["宝贝月销", "月销", "销量"],
+    "crawlDate": ["抓取日期", "数据抓取日期"]
+  },
+  "annotationColumns": {
+    "platform": "平台",
+    "brand": "品牌",
+    "product": "产品",
+    "recentLaunchDate": "近32日上新日期"
+  }
+}

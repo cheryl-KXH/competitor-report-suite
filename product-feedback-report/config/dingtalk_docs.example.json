@@ -1,0 +1,12 @@
+{
+  "serverName": "dingtalk-docs",
+  "streamableHttpUrl": "",
+  "workspaceId": "",
+  "rootFolderId": "",
+  "rootFolderPath": [],
+  "notes": [
+    "复制为 config/dingtalk_docs.json 后填写真实钉钉文档 MCP 配置。",
+    "第一版可先本地调试，上传下载能力后续按实际 MCP 返回结构微调。"
+  ]
+}
+

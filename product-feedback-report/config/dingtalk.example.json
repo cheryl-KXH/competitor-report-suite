@@ -1,0 +1,12 @@
+{
+  "serverName": "dingtalk-ai-table",
+  "streamableHttpUrl": "",
+  "baseId": "",
+  "tableId": "",
+  "notes": [
+    "复制为 config/dingtalk.json 后填写真实 baseId/tableId。",
+    "streamableHttpUrl 留空时使用 mcporter 中注册的 serverName。",
+    "Streamable HTTP URL 带访问令牌，不要提交。"
+  ]
+}
+

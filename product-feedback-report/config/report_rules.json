@@ -1,0 +1,54 @@
+{
+  "outputDirectory": "outputs",
+  "statuses": {
+    "productMenuRunning": "产品清单生成中",
+    "waitingAnnotation": "待标注",
+    "dataTablesRunning": "数表生成中",
+    "waitingReport": "待生成报告",
+    "reportRunning": "报告生成中",
+    "done": "已生成",
+    "failed": "生成失败"
+  },
+  "reportTitle": "竞品跟踪反馈报告",
+  "productInfoSource": {
+    "baseId": "14lgGw3P8vvl1yqpiGv2oZoO85daZ90D",
+    "tableId": "hERWDMS",
+    "matchFields": [
+      "brand",
+      "productName",
+      "launchDate"
+    ],
+    "fields": {
+      "productName": {
+        "label": "新品名称",
+        "fieldId": "mHe1U1b",
+        "extract": "text"
+      },
+      "series": {
+        "label": "产品系列归属",
+        "fieldId": "YyMvdeQ",
+        "extract": "text"
+      },
+      "sellingPoint": {
+        "label": "产品卖点介绍",
+        "fieldId": "YvhSNac",
+        "extract": "text"
+      },
+      "price": {
+        "label": "产品价格",
+        "fieldId": "S25BNzT",
+        "extract": "rich_text_markdown"
+      },
+      "ingredients": {
+        "label": "原料构成",
+        "fieldId": "hvyPmEb",
+        "extract": "text"
+      },
+      "appearanceImages": {
+        "label": "产品外观",
+        "fieldId": "bF5E1o2",
+        "extract": "attachment_image_urls"
+      }
+    }
+  }
+}

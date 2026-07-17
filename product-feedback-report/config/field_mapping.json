@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "description": "钉钉 AI 表字段映射。优先使用 fieldId；字段名变化时维护 fieldNames。",
+  "fields": {
+    "brand": {
+      "label": "品牌",
+      "fieldId": "01ZM8y7",
+      "required": true
+    },
+    "productName": {
+      "label": "关注新品",
+      "fieldId": "Enrr5gZ",
+      "required": true
+    },
+    "launchDate": {
+      "label": "报告日期",
+      "fieldId": "mKUEya0",
+      "required": true
+    },
+    "day30": {
+      "label": "30日",
+      "fieldId": "SSrz1N1",
+      "required": false
+    },
+    "allData": {
+      "label": "所有数据",
+      "fieldId": "",
+      "required": false
+    },
+    "deliveryData": {
+      "label": "外卖数据",
+      "fieldId": "citgEXH",
+      "required": true
+    },
+    "productMenu": {
+      "label": "产品清单及上新日期",
+      "fieldId": "YnLeVwN",
+      "required": false
+    },
+    "meituanData": {
+      "label": "美团",
+      "fieldId": "tyzP9wf",
+      "required": false
+    },
+    "elemeData": {
+      "label": "饿了么",
+      "fieldId": "kHDjwB7",
+      "required": false
+    },
+    "jdData": {
+      "label": "京东",
+      "fieldId": "YKOJ1JO",
+      "required": false
+    },
+    "dianping": {
+      "label": "大众点评",
+      "fieldId": "Hkl2xDv",
+      "required": false
+    },
+    "weibo": {
+      "label": "微博",
+      "fieldId": "GGXHqyG",
+      "required": false
+    },
+    "xiaohongshu": {
+      "label": "小红书",
+      "fieldId": "NvvlACX",
+      "required": false
+    },
+    "douyin": {
+      "label": "抖音",
+      "fieldId": "CtZivbf",
+      "required": false
+    },
+    "bilibili": {
+      "label": "B站",
+      "fieldId": "KfgxCcf",
+      "required": false
+    },
+    "report": {
+      "label": "跟踪报告",
+      "fieldId": "amWTton",
+      "required": false
+    },
+    "status": {
+      "label": "状态",
+      "fieldId": "",
+      "fieldNames": [
+        "状态"
+      ],
+      "required": false
+    },
+    "feedback": {
+      "label": "反馈信息",
+      "fieldId": "8izZBk8",
+      "fieldNames": [
+        "错误信息",
+        "反馈信息"
+      ],
+      "required": false
+    },
+    "generatedAt": {
+      "label": "生成时间",
+      "fieldId": "",
+      "fieldNames": [
+        "生成时间"
+      ],
+      "required": false
+    }
+  }
+}
