@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "description": "这份周报的业务规则。后续可用自然语言要求 Codex 修改本文件。",
+  "defaultDateWindow": {
+    "type": "last_complete_saturday_to_friday",
+    "description": "默认导出周期按周六到周五计算：周五导出上周六到本周五；周一导出上一个完整周六到周五。",
+    "startWeekday": "saturday",
+    "endWeekday": "friday"
+  },
+  "defaultBrands": [
+    "霸王茶姬",
+    "茶百道",
+    "古茗",
+    "奈雪的茶",
+    "乐乐茶",
+    "阿嬷手作",
+    "去茶山",
+    "爷爷不泡茶",
+    "瑞幸",
+    "上山喝茶",
+    "茉莉奶白",
+    "混果汁",
+    "Blueglass",
+    "茉酸奶",
+    "荔其",
+    "梨村茶铺",
+    "BeFineCha 百分茶",
+    "Matcha Wang",
+    "BASAO 康普茶",
+    "元古茶铺",
+    "李茶的茶",
+    "眷茶",
+    "另茶",
+    "BlackTree 黑树",
+    "tea'stone",
+    "大地茶场 tazaTe",
+    "小山堂",
+    "CHARLIETOWN 红茶公司",
+    "裕莲茶楼",
+    "周四晚",
+    "桂茶白",
+    "逛山",
+    "椿田熟成茶行",
+    "开吉茶馆",
+    "轻茶山外",
+    "淡马茶坊",
+    "茶月山",
+    "高山3班",
+    "ops",
+    "泰柯茶园",
+    "唐沫茶兮"
+  ],
+  "recordFilter": {
+    "dateField": "launchDate",
+    "brandField": "brand"
+  },
+  "businessFilter": {
+    "field": "business",
+    "allowedValues": ["喜茶", "野萃山", "茶坊"]
+  },
+  "trackedBrandsTable": {
+    "tableName": "关注竞品品牌",
+    "tableId": "LgIHy9m",
+    "brandFieldId": "01ZM8y7",
+    "businessFieldId": "UzeLxbw",
+    "statusFieldId": "xKMCtNR",
+    "activeStatusName": "进行中",
+    "activeStatusOptionId": "m8R5hKj01b",
+    "businessOptionIds": {
+      "喜茶": "TZgmESCGw9",
+      "野萃山": "rcZ5fHFssJ",
+      "茶坊": "VKFkh5cNHf"
+    }
+  },
+  "weeklyReportTable": {
+    "tableName": "竞品新品周报",
+    "tableId": "DpunvLg",
+    "fields": {
+      "reportUrl": "kwgT5KT",
+      "business": "kRL94q5",
+      "startDate": "64YCbc4",
+      "endDate": "xuEzHC3",
+      "year": "dKqEOXl",
+      "week": "HxM1Fws",
+      "status": "sncqgwi",
+      "feedbackMessage": "O0VPcSg",
+      "generatedAt": "QCdk10m"
+    },
+    "statusOptionIds": {
+      "未生成": "S2dIinvEqW",
+      "等待1-2分钟": "H8z1i1wSIc",
+      "已生成": "FRN4t5XEEc",
+      "生成异常": "6buaflfN4z",
+      "生成失败": "qixE2nWYGG"
+    }
+  },
+  "categoryRule": {
+    "description": "品类只显示一个。优先级：茶特调 > 果蔬茶 > 柠檬茶 > 酒元素 > 主品类。",
+    "additionalField": "additionalCategory",
+    "mainField": "mainCategory",
+    "priority": ["茶特调", "果蔬茶", "柠檬茶", "酒元素"],
+    "fallback": "mainCategory",
+    "separator": "、"
+  },
+  "remarkRule": {
+    "order": ["returnStatus", "collaboration", "remark"],
+    "separator": "，",
+    "emptyText": "/",
+    "returnStatus": {
+      "showValue": "回归",
+      "truthyValues": ["回归", "是", "true", "TRUE", "1"],
+      "ignoredValues": ["上新", "否", "false", "FALSE", "0"]
+    },
+    "collaboration": {
+      "suffix": "联名"
+    }
+  },
+  "priceRule": {
+    "strikeParenthesizedPrice": true,
+    "parenthesizedPricePattern": "\\d+(?:\\.\\d+)?\\s*元",
+    "summaryWrapAfterSlash": true
+  },
+  "dataQualityRule": {
+    "enabled": true,
+    "continueOnWarning": true,
+    "warnMissingImages": true,
+    "requiredTextFields": {
+      "category": "品类",
+      "productName": "新品名称",
+      "launchDate": "上市日期",
+      "price": "产品价格",
+      "sellingPoint": "产品卖点介绍",
+      "ingredients": "原料构成"
+    }
+  },
+  "sort": {
+    "brandOrder": "defaultBrands",
+    "withinBrand": ["launchDate", "series", "tableOrder"]
+  }
+}

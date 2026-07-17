@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "description": "Excel 怎么排版、数据写到哪里。后续可用自然语言要求 Codex 修改本文件。",
+  "worksheetName": "汇总",
+  "outputDirectory": "outputs",
+  "titleTemplate": "竞品新品周报{start_m}.{start_d}-{end_m}.{end_d}",
+  "introText": "以下是过去一周关注品牌的新品信息，如果有需要关注的单品，请告知，谢谢！",
+  "trackedBrandsPrefix": "*关注品牌包括：",
+  "pageFill": {
+    "columns": "A:I",
+    "fill": "FFFFFF"
+  },
+  "columnWidthRules": {
+    "tableRange": "B:H",
+    "totalTableWidthCm": 18.0,
+    "fixedColumnsChars": {
+      "B": 12.5,
+      "C": 8.0,
+      "D": 7.0,
+      "F": 9.0
+    },
+    "sideColumnsChars": {
+      "A": 6.0,
+      "I": 6.0
+    },
+    "autoContentColumns": ["E", "G"],
+    "fillRemainingColumn": "H",
+    "minColumnsChars": {
+      "E": 10.0,
+      "G": 10.0,
+      "H": 12.0
+    },
+    "maxColumnsChars": {
+      "E": 24.0,
+      "G": 26.0
+    },
+    "paddingChars": {
+      "E": 2.5,
+      "G": 2.5
+    },
+    "allowOverflowTableWidth": true
+  },
+  "logo": {
+    "path": "assets/logo/report_logo.png",
+    "row": 2,
+    "range": "B:H",
+    "heightCm": 2.0
+  },
+  "summary": {
+    "titleRow": 3,
+    "introRow": 5,
+    "headerRow": 6,
+    "startRow": 7,
+    "columns": {
+      "brand": "B",
+      "count": "C",
+      "category": "D",
+      "productName": "E",
+      "launchDate": "F",
+      "price": "G",
+      "remark": "H"
+    },
+    "headers": {
+      "brand": "品牌",
+      "count": "本周新品数量",
+      "category": "品类",
+      "productName": "新品名称",
+      "launchDate": "上市时间",
+      "price": "价格",
+      "remark": "备注"
+    },
+    "dateFormat": "m月d日",
+    "noWrapColumns": ["category", "productName"],
+    "priceWrapThresholdChars": 19
+  },
+  "details": {
+    "blankRowsAfterSummary": 1,
+    "brandHeaderTemplate": "{brand}本周新品数量：{count}个",
+    "labelColumn": "B",
+    "valueRange": "C:H",
+    "labelWrapText": false,
+    "ingredientsAlignment": "center",
+    "rowsPerProduct": [
+      ["productName", "新品名称"],
+      ["series", "产品系列归属"],
+      ["sellingPoint", "产品卖点介绍"],
+      ["price", "产品价格"],
+      ["ingredients", "原料构成"],
+      ["appearanceImages", "产品外观"]
+    ]
+  },
+  "fonts": {
+    "defaultSize": 10,
+    "titleSize": 16,
+    "introSize": 12,
+    "trackedBrandsSize": 8
+  },
+  "colors": {
+    "white": "FFFFFF",
+    "black": "000000",
+    "headerFill": "DADADA",
+    "brandFill": "FFFF00",
+    "detailHeaderFill": "FEFF00",
+    "detailLabelFill": "DAE3F4"
+  },
+  "rowHeightsPt": {
+    "topSpacer": 62.35,
+    "title": 16.25,
+    "intro": 17.6,
+    "summaryHeader": 30.5,
+    "trackedBrands": 16.25,
+    "detailHeader": 16.25,
+    "minText": 16.8,
+    "maxText": 120.0,
+    "imagePadding": 10.0
+  },
+  "autoFit": {
+    "singleLineHeightPt": 16.8,
+    "additionalLineHeightPt": 15.0,
+    "minTextRowHeightPt": 16.8,
+    "maxTextRowHeightPt": 120.0,
+    "summaryWrapColumns": ["G", "H"],
+    "summaryCharsPerLineFactor": 1.45,
+    "detailLongTextCharsPerLineFactor": 1.5,
+    "detailShortTextCharsPerLineFactor": 1.55,
+    "summaryVerticalPaddingPt": 3.0,
+    "detailLongTextPaddingPt": 4.0,
+    "detailShortTextPaddingPt": 2.0,
+    "columnWidthPixelScale": 7.0,
+    "columnWidthPixelPadding": 5.0
+  },
+  "rowHeightRule": {
+    "singleLinePt": 16.8,
+    "additionalLinePt": 15.0
+  },
+  "textWrap": {
+    "punctuationRules": {
+      "avoidLineStart": "，。；：！？、）】》",
+      "avoidLineEnd": "（【《"
+    }
+  },
+  "image": {
+    "heightCm": 4.0,
+    "rowHeightPt": 120.0,
+    "anchorColumn": "C",
+    "range": "C:H",
+    "maxWidthPx": 520,
+    "paddingPx": 8,
+    "centerInRange": true
+  },
+  "notes": [
+    "列宽规则：B/C/D/F 固定，E 根据产品名自动适配，G 根据价格 / 分隔块自动适配，H 自动补足剩余宽度。",
+    "汇总表价格列只要出现 / 就在 / 后插入单个换行，且 / 前后价格块不被切开。",
+    "A:I 无业务底纹区域统一填充白色，并应用配置字体，避免回退到宋体。",
+    "行高重点适配关注品牌说明、汇总表 G/H、产品卖点介绍和超长原料构成；短文本明细行保持紧凑。",
+    "关注品牌说明行使用 B:H 合并单元格；其他横向范围使用跨列居中，只保留汇总表品牌列和新品数量列的纵向合并。"
+  ]
+}

@@ -1,0 +1,20 @@
+config/dingtalk.json
+config/dingtalk_docs.json
+outputs/
+tmp/
+*.log
+__pycache__/
+.DS_Store
+
+# Internal proprietary fonts. Keep them local only.
+assets/fonts/*.ttf
+assets/fonts/*.otf
+assets/fonts/*.ttc
+assets/fonts/*.woff
+assets/fonts/*.woff2
+
+# Internal proprietary logos. Keep them local only.
+assets/logo/*.png
+assets/logo/*.jpg
+assets/logo/*.jpeg
+assets/logo/*.webp

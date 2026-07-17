@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "内部字体文件位置配置。字体不要提交到 git，不要上传外部平台。",
+  "fontDirectory": "assets/fonts",
+  "defaultFonts": {
+    "chineseExcelName": "Microsoft YaHei",
+    "latinExcelName": "Arial",
+    "cssFamily": "Microsoft YaHei, Arial, sans-serif"
+  },
+  "chineseFont": {
+    "excelName": "方正FW筑紫黑简 R",
+    "defaultExcelName": "Microsoft YaHei",
+    "fileName": "方正FW筑紫黑简 R.ttf"
+  },
+  "latinFont": {
+    "excelName": "Heytea Sans Serif Regular",
+    "defaultExcelName": "Arial",
+    "fileName": "Heytea Sans Serif Regular.otf"
+  },
+  "notes": [
+    "Excel 文件只记录字体名称，不会嵌入字体文件。",
+    "生成和打开 Excel 的电脑需要安装对应字体，或把字体文件放到 fontDirectory 并在本机安装。",
+    "字体文件缺失时脚本会使用 defaultFonts/defaultExcelName，不阻断生成。",
+    "这两个字体是内部独家字体，不提交、不上传外部。"
+  ]
+}

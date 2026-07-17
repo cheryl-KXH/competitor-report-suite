@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "description": "HTML/PNG 长图排版配置。用于输出接近 Excel 视觉的周报图片，不影响 Excel 生成配置。",
+  "outputDirectory": "outputs",
+  "page": {
+    "widthPx": 672,
+    "paddingTopPx": 28,
+    "paddingBottomPx": 28,
+    "background": "FFFFFF"
+  },
+  "logo": {
+    "path": "assets/logo/report_logo.png",
+    "heightPx": 65,
+    "marginBottomPx": 8
+  },
+  "fonts": {
+    "chineseFontFileKey": "chineseFont",
+    "latinFontFileKey": "latinFont",
+    "defaultSizePx": 12,
+    "titleSizePx": 18,
+    "introSizePx": 13,
+    "smallSizePx": 9
+  },
+  "colors": {
+    "white": "FFFFFF",
+    "black": "000000",
+    "headerFill": "DADADA",
+    "brandFill": "FFFF00",
+    "detailHeaderFill": "FEFF00",
+    "detailLabelFill": "DAE3F4"
+  },
+  "summary": {
+    "tableWidthPx": 588,
+    "fixedColumnWidthsPx": {
+      "brand": 82,
+      "count": 54,
+      "category": 52,
+      "launchDate": 60
+    },
+    "flexColumns": ["productName", "price", "remark"],
+    "flexColumnMinMaxPx": {
+      "productName": [118, 190],
+      "price": [72, 156],
+      "remark": [72, 140]
+    },
+    "textWidthPaddingPx": {
+      "productName": 18,
+      "price": 18,
+      "remark": 16
+    },
+    "rowHeightByLineCountPx": {
+      "1": 20,
+      "2": 32,
+      "3": 44,
+      "4": 56,
+      "5": 68
+    },
+    "headerHeightPx": 20
+  },
+  "trackedBrands": {
+    "wrap": true,
+    "marginBottomPx": 12
+  },
+  "details": {
+    "tableWidthPx": 588,
+    "labelWidthSource": "summary.brand",
+    "imageHeightPx": 151,
+    "imageMaxWidthPx": 260,
+    "cellPaddingPx": 3,
+    "brandHeaderHeightPx": 18
+  },
+  "textAlignment": {
+    "sellingPoint": "justify"
+  },
+  "border": {
+    "widthPx": 1
+  },
+  "render": {
+    "deviceScaleFactor": 2,
+    "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  }
+}

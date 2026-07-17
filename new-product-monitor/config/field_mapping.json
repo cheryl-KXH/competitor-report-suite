@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "description": "钉钉 AI 表字段到脚本标准字段的翻译规则。已配置 fieldId 的字段按 fieldId 读取；未配置 fieldId 的字段保留 fieldNames 兜底。",
+  "standardFields": {
+    "brand": {
+      "label": "品牌",
+      "fieldId": "01ZM8y7",
+      "extract": "select_name",
+      "required": true
+    },
+    "business": {
+      "label": "业务",
+      "fieldId": "5rQfiUy",
+      "extract": "filter_up_names",
+      "required": false
+    },
+    "productName": {
+      "label": "新品",
+      "fieldId": "mHe1U1b",
+      "extract": "text",
+      "required": true
+    },
+    "launchDate": {
+      "label": "上市日期",
+      "fieldId": "mKUEya0",
+      "extract": "date",
+      "required": true
+    },
+    "price": {
+      "label": "价格",
+      "fieldId": "S25BNzT",
+      "extract": "rich_text_markdown",
+      "required": false
+    },
+    "mainCategory": {
+      "label": "主品类",
+      "fieldId": "ZodCdUF",
+      "extract": "select_name",
+      "required": false
+    },
+    "additionalCategory": {
+      "label": "附加品类",
+      "fieldId": "5XDJxdr",
+      "extract": "multi_select_names",
+      "required": false
+    },
+    "series": {
+      "label": "系列归属",
+      "fieldId": "YyMvdeQ",
+      "extract": "text",
+      "required": false
+    },
+    "sellingPoint": {
+      "label": "产品卖点介绍",
+      "fieldId": "YvhSNac",
+      "extract": "text",
+      "required": false
+    },
+    "ingredients": {
+      "label": "原料构成",
+      "fieldId": "hvyPmEb",
+      "extract": "text",
+      "required": false
+    },
+    "appearanceImages": {
+      "label": "产品外观",
+      "fieldId": "bF5E1o2",
+      "extract": "attachment_image_urls",
+      "required": false
+    },
+    "returnStatus": {
+      "label": "回归",
+      "fieldId": "nIh71Bo",
+      "extract": "generic",
+      "required": false
+    },
+    "collaboration": {
+      "label": "联名",
+      "fieldId": "kItU0JS",
+      "extract": "text",
+      "required": false
+    },
+    "remark": {
+      "label": "备注",
+      "fieldId": "0PXREzW",
+      "extract": "text",
+      "required": false
+    }
+  }
+}

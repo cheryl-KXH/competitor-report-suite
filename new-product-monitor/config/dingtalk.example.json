@@ -1,0 +1,12 @@
+{
+  "serverName": "dingtalk-ai-table",
+  "streamableHttpUrl": "",
+  "baseId": "14lgGw3P8vvl1yqpiGv2oZoO85daZ90D",
+  "tableId": "hERWDMS",
+  "notes": [
+    "复制本文件为 config/dingtalk.json 后使用。",
+    "如果本机 mcporter 已配置 dingtalk-ai-table，可以保持 streamableHttpUrl 为空。",
+    "交接或更换账号时，把新的 Streamable HTTP URL 填到 streamableHttpUrl。",
+    "Streamable HTTP URL 带访问令牌，不要提交到 git 或上传外部平台。"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "serverName": "dingtalk-docs",
+  "streamableHttpUrl": "",
+  "workspaceId": "",
+  "businessRootFolderIds": {
+    "喜茶": "Gl6Pm2Db8D3mok1vFnG9zNaAJxLq0Ee4",
+    "野萃山": "ydxXB52LJq7l1yqMi3QMAQLpWqjMp697",
+    "茶坊": "jb9Y4gmKWr7l1yqji4mbrrBEVGXn6lpz"
+  },
+  "rootFolderId": "",
+  "rootFolderPath": ["原始文件：喜茶竞品新品周报"],
+  "notes": [
+    "复制本文件为 config/dingtalk_docs.json 后使用，或设置环境变量 DINGTALK_DOCS_MCP_URL。",
+    "streamableHttpUrl 是钉钉文档/知识库 MCP URL，带访问令牌，不要提交到 git。",
+    "workspaceId 可填知识库 ID 或知识库 URL。",
+    "businessRootFolderIds 按业务决定上传根目录；rootFolderId/rootFolderPath 只作为兜底。"
+  ]
+}
