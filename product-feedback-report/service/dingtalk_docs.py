@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -7,11 +8,20 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from service import dingtalk_table
+
+
+DEFAULT_LOCAL_UPLOAD_ROOT_FOLDER_NAME = "原始文件：竞品新品跟踪反馈"
+
+
+class DownloadUrlUnavailableError(RuntimeError):
+    pass
 
 
 def _selector(config: dict[str, Any], tool_name: str) -> list[str]:
@@ -151,9 +161,15 @@ def _download_url(payload: Any) -> str:
     if isinstance(payload, dict):
         for key in ("downloadUrl", "url", "resourceUrl", "fileUrl"):
             value = payload.get(key)
-            if value and str(value).lower() != "null":
-                return str(value)
+            found = _download_url(value)
+            if found:
+                return found
         for value in payload.values():
+            found = _download_url(value)
+            if found:
+                return found
+    if isinstance(payload, list):
+        for value in payload:
             found = _download_url(value)
             if found:
                 return found
@@ -181,6 +197,98 @@ def _safe_filename(name: str, extension: str = "") -> str:
     if extension and not clean.lower().endswith(f".{extension.lower()}"):
         clean = f"{clean}.{extension}"
     return clean
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_manifest_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.dingtalk-cache.json")
+
+
+def _remote_version(info: dict[str, Any]) -> str:
+    value = _info_value(info, "updateTime")
+    return str(value) if value is not None else ""
+
+
+def _cached_download_path(
+    output_path: Path, node_id: str, info: dict[str, Any]
+) -> Path | None:
+    version = _remote_version(info)
+    manifest_path = _cache_manifest_path(output_path)
+    if not version or not output_path.is_file() or not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        str(manifest.get("nodeId") or "") != node_id
+        or str(manifest.get("updateTime") or "") != version
+        or str(manifest.get("filename") or "") != output_path.name
+    ):
+        return None
+    expected_hash = str(manifest.get("sha256") or "")
+    return output_path if expected_hash and _file_sha256(output_path) == expected_hash else None
+
+
+def _write_download_cache(
+    path: Path, node_id: str, info: dict[str, Any]
+) -> None:
+    version = _remote_version(info)
+    if not version or not path.is_file():
+        return
+    manifest = {
+        "nodeId": node_id,
+        "updateTime": version,
+        "filename": path.name,
+        "sha256": _file_sha256(path),
+    }
+    manifest_path = _cache_manifest_path(path)
+    temporary = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    temporary.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(manifest_path)
+
+
+def _validate_downloaded_file(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError("下载结果为空。")
+    if path.suffix.lower() != ".xlsx":
+        return
+    if not zipfile.is_zipfile(path):
+        raise RuntimeError("下载结果不是有效的 xlsx 文件。")
+    with zipfile.ZipFile(path) as workbook:
+        names = set(workbook.namelist())
+    if "[Content_Types].xml" not in names or "xl/workbook.xml" not in names:
+        raise RuntimeError("下载结果缺少 xlsx 工作簿结构。")
+
+
+def _download_binary(
+    url: str, headers: dict[str, str], output_path: Path, channel: str
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.name}.download")
+    try:
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                content = response.read()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"{channel}签名下载失败（HTTP {exc.code}）。") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"{channel}签名下载网络失败。") from exc
+        temporary.write_bytes(content)
+        _validate_downloaded_file(temporary)
+        temporary.replace(output_path)
+        return output_path
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def list_nodes(config: dict[str, Any], folder_id: str) -> list[dict[str, Any]]:
@@ -256,6 +364,80 @@ def ensure_target_root(config: dict[str, Any]) -> tuple[str | None, str]:
     return folder_id, folder_url
 
 
+def local_upload_root_folder_id(config: dict[str, Any]) -> str:
+    configured = str(config.get("localUploadRootFolderId") or "").strip()
+    if configured:
+        return node_id_from_url(configured) or configured
+    name = str(
+        config.get("localUploadRootFolderName") or DEFAULT_LOCAL_UPLOAD_ROOT_FOLDER_NAME
+    ).strip()
+    if not name:
+        raise RuntimeError("本地上传归档根目录名称不能为空。")
+    matches = [node for node in list_root_nodes(config) if _node_name(node) == name]
+    if not matches:
+        search_result = call_docs_tool(
+            config, "search_documents", {"keyword": name, "pageSize": 30}
+        )
+        matches = [
+            node
+            for node in _iter_nodes(_data_payload(search_result))
+            if _node_name(node) == name
+            and (
+                str(node.get("nodeType") or "").lower() == "folder"
+                or str(node.get("extension") or "").lower() == "folder"
+            )
+        ]
+    if not matches:
+        raise RuntimeError(
+            f"未找到钉钉文档归档根目录“{name}”，请配置 localUploadRootFolderId。"
+        )
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"钉钉文档根目录存在多个同名“{name}”，请配置 localUploadRootFolderId 明确指定。"
+        )
+    node_id = _node_id(matches[0])
+    if not node_id:
+        raise RuntimeError(f"归档根目录“{name}”缺少节点 ID。")
+    return node_id
+
+
+def ensure_local_upload_task_folder(
+    config: dict[str, Any], year: int, month: int, task_name: str
+) -> tuple[str, str]:
+    month_id, _ = ensure_local_upload_month_folder(config, year, month)
+    clean_name = task_name.strip()
+    if not clean_name:
+        raise RuntimeError("任务文件夹名称不能为空。")
+    return ensure_child_folder(config, month_id, clean_name)
+
+
+def ensure_local_upload_month_folder(
+    config: dict[str, Any], year: int, month: int
+) -> tuple[str, str]:
+    if year < 1000 or year > 9999:
+        raise RuntimeError(f"报告日期年份无效：{year}")
+    if month < 1 or month > 12:
+        raise RuntimeError(f"报告日期月份无效：{month}")
+    root_id = local_upload_root_folder_id(config)
+    year_id, _ = ensure_child_folder(config, root_id, f"{year}年")
+    return ensure_child_folder(config, year_id, f"{year}年{month}月")
+
+
+def child_folders(config: dict[str, Any], parent_id: str) -> list[tuple[str, str]]:
+    """返回直接子文件夹的 (node_id, name)。"""
+    folders: list[tuple[str, str]] = []
+    for node in list_nodes(config, parent_id):
+        node_type = str(node.get("nodeType") or "").lower()
+        extension = str(node.get("extension") or "").lower()
+        if node_type != "folder" and extension != "folder":
+            continue
+        node_id = _node_id(node)
+        name = _node_name(node)
+        if node_id and name:
+            folders.append((node_id, name))
+    return folders
+
+
 def get_document_info(config: dict[str, Any], node_id: str) -> dict[str, Any]:
     data = _data_payload(call_docs_tool(config, "get_document_info", {"nodeId": node_id}))
     return data if isinstance(data, dict) else {}
@@ -306,18 +488,31 @@ def download_file(config: dict[str, Any], node: dict[str, Any], output_dir: Path
         raise RuntimeError(f"文件节点缺少 nodeId：{node}")
     extension = str(node.get("extension") or "").strip().lstrip(".")
     output_path = output_dir / _safe_filename(_node_name(node), extension)
+    info: dict[str, Any] = {}
+    try:
+        info = get_document_info(config, node_id)
+    except Exception:
+        pass
+    cached = _cached_download_path(output_path, node_id, info)
+    if cached:
+        return cached
+
     result = call_docs_tool(config, "download_file", {"nodeId": node_id})
     url = _download_url(result)
     if not url:
-        raise RuntimeError(
+        raise DownloadUrlUnavailableError(
             f"钉钉文档 MCP 未返回可下载 URL：{_node_name(node)} ({node_id})。"
             "请确认该文件是可下载附件，或更新钉钉文档 MCP 后重试。"
         )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url)
-    with urllib.request.urlopen(request, timeout=120) as response:
-        output_path.write_bytes(response.read())
-    return output_path
+    headers = _info_value(result, "headers") or {}
+    request_headers = (
+        {str(key): str(value) for key, value in headers.items()}
+        if isinstance(headers, dict)
+        else {}
+    )
+    downloaded = _download_binary(url, request_headers, output_path, "MCP")
+    _write_download_cache(downloaded, node_id, info)
+    return downloaded
 
 
 def download_folder(config: dict[str, Any], folder_id: str, output_dir: Path) -> Path:
@@ -341,19 +536,6 @@ def download_folder(config: dict[str, Any], folder_id: str, output_dir: Path) ->
 
 
 def download_linked_folder(config: dict[str, Any], value: Any, output_dir: Path) -> Path | None:
-    local = local_path_from_link(value)
-    if local and local.is_dir():
-        return local
-    named_local = local_folder_from_attachment_name(value)
-    if named_local:
-        return named_local
-    named_file = local_file_from_attachment_name(value)
-    if named_file:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        target = output_dir / named_file.name
-        if named_file.resolve() != target.resolve():
-            shutil.copy2(named_file, target)
-        return output_dir
     candidates = value if isinstance(value, list) else [value]
     for item in candidates:
         link = extract_link(item)
@@ -381,16 +563,24 @@ def download_linked_folder(config: dict[str, Any], value: Any, output_dir: Path)
                 )
                 return output_dir
             raise RuntimeError(f"钉钉链接既不是文件夹，也不是 xlsx 文件：{link}")
+
+    local = local_path_from_link(value)
+    if local and local.is_dir():
+        return local
+    named_local = local_folder_from_attachment_name(value)
+    if named_local:
+        return named_local
+    named_file = local_file_from_attachment_name(value)
+    if named_file:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        target = output_dir / named_file.name
+        if named_file.resolve() != target.resolve():
+            shutil.copy2(named_file, target)
+        return output_dir
     return None
 
 
 def download_linked_file(config: dict[str, Any], value: Any, output_dir: Path) -> Path | None:
-    local = local_path_from_link(value)
-    if local and local.is_file():
-        return local
-    named_local = local_file_from_attachment_name(value)
-    if named_local:
-        return named_local
     candidates = value if isinstance(value, list) else [value]
     for item in candidates:
         link = extract_link(item)
@@ -413,6 +603,16 @@ def download_linked_file(config: dict[str, Any], value: Any, output_dir: Path) -
             {"nodeId": node_id, "name": filename or f"{node_id}.xlsx", "extension": extension},
             output_dir,
         )
+
+    # A DingTalk node link is the source of truth. Only fall back to local files
+    # when the cell does not contain a downloadable DingTalk link; otherwise a
+    # stale same-named file on Desktop can silently override the latest version.
+    local = local_path_from_link(value)
+    if local and local.is_file():
+        return local
+    named_local = local_file_from_attachment_name(value)
+    if named_local:
+        return named_local
     return None
 
 
@@ -426,6 +626,21 @@ def _upload_info_value(data: Any, *keys: str) -> Any:
             if found:
                 return found
     return None
+
+
+def _cache_uploaded_file(
+    config: dict[str, Any], path: Path, committed: dict[str, Any]
+) -> None:
+    node_id = _node_id(committed)
+    if not node_id:
+        return
+    info = committed
+    if not _remote_version(info):
+        try:
+            info = get_document_info(config, node_id)
+        except Exception:
+            return
+    _write_download_cache(path, node_id, info)
 
 
 def upload_file(config: dict[str, Any], path: Path, folder_id: str | None = None) -> str:
@@ -462,6 +677,7 @@ def upload_file(config: dict[str, Any], path: Path, folder_id: str | None = None
         "uploadKey": upload_key,
         "name": path.name,
         "fileSize": path.stat().st_size,
+        "convertToOnlineDoc": False,
     }
     if folder_id:
         commit_payload["folderId"] = folder_id
@@ -469,5 +685,6 @@ def upload_file(config: dict[str, Any], path: Path, folder_id: str | None = None
         commit_payload["workspaceId"] = config["workspaceId"]
     committed = _data_payload(call_docs_tool(config, "commit_uploaded_file", commit_payload))
     if isinstance(committed, dict):
+        _cache_uploaded_file(config, path, committed)
         return _node_url(committed)
     return str(committed)

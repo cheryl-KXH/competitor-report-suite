@@ -8,13 +8,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from service import dingtalk_table
 from service.config import load_configs, output_root
-from scripts.data_processing import RECENT_LAUNCH_DAYS, RawSaleRow, find_delivery_rows, normalize_text, parse_date, write_product_menu
+from scripts.delivery.processing import RECENT_LAUNCH_DAYS, RawSaleRow, find_delivery_rows, normalize_text, parse_date, write_product_menu
 
 
 def _extract_select_name(value: Any) -> str:

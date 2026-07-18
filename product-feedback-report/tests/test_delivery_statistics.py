@@ -7,7 +7,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from scripts.data_processing import (
+from scripts.delivery.processing import (
     AnnotationRow,
     RawSaleRow,
     _annotation_lookup,
@@ -15,7 +15,7 @@ from scripts.data_processing import (
     generate_jd_summary,
     generate_platform_delivery_summary,
 )
-from scripts.generate_delivery_tables import generate_delivery_tables
+from scripts.delivery.generate_tables import generate_delivery_tables
 
 
 def sale(
@@ -59,9 +59,9 @@ class DeliveryStatisticsTests(unittest.TestCase):
 
         self.assertEqual(
             values[0],
-            ("排名", "商品名称", "美团日店均销量", "总销量", "总销量占比", "总在售天数", "在售门店数", "上新日期"),
+            ("排名", "商品名称", "日店均销量", "总销量", "总销量占比", "总在售天数", "在售门店数", "上新日期"),
         )
-        self.assertEqual(values[1], (1, "产品A", 7.5, 90, 0.5, 12, 2, datetime(2026, 7, 5)))
+        self.assertEqual(values[1], (1, "产品A", 6.4286, 90, 0.5, 14, 2, datetime(2026, 7, 5)))
         self.assertEqual(values[2], (1, "产品B", 1.5, 90, 0.5, 60, 2, None))
 
     def test_sale_days_boundaries_and_exact_annotation_key(self) -> None:
@@ -73,8 +73,23 @@ class DeliveryStatisticsTests(unittest.TestCase):
             ]
         )
         self.assertEqual(_store_sale_days(sale("美团", "门店1", "产品A", 1, date(2026, 7, 10)), lookup), 1)
+        self.assertEqual(_store_sale_days(sale("美团", "门店1", "产品A", 1, date(2026, 7, 15)), lookup), 6)
         self.assertEqual(_store_sale_days(sale("美团", "门店1", "产品A", 1, date(2026, 8, 20)), lookup), 30)
         self.assertEqual(_store_sale_days(sale("美团", "门店1", "未标注", 1, date(2026, 7, 10)), lookup), 30)
+
+    def test_delivery_output_uses_four_decimal_average_and_two_decimal_share(self) -> None:
+        rows = [sale("饿了么", "门店1", "产品A", 1, date(2026, 7, 10))]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "饿了么.xlsx"
+            generate_platform_delivery_summary(rows, [], "饿了么", output)
+            ws = load_workbook(output, data_only=True).active
+            average = ws["C2"].value
+            average_format = ws["C2"].number_format
+            share_format = ws["E2"].number_format
+
+        self.assertEqual(average, 0.0333)
+        self.assertEqual(average_format, "0.0000")
+        self.assertEqual(share_format, "0.00%")
 
     def test_future_launch_date_reports_context(self) -> None:
         rows = [sale("美团", "门店1", "产品A", 1, date(2026, 7, 10))]
@@ -103,12 +118,15 @@ class DeliveryStatisticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "京东.xlsx"
             generate_jd_summary(rows, [annotation("京东秒送", "产品A", date(2026, 7, 5))], output)
-            values = list(load_workbook(output, data_only=True).active.values)
+            ws = load_workbook(output, data_only=True).active
+            values = list(ws.values)
+            share_format = ws["F2"].number_format
 
         self.assertEqual(values[0], ("排名", "商品名称", "销量加总", "在售门店数", "总销量", "总销量占比", "上新日期"))
         self.assertEqual(values[1], (1, "产品A", 200, 2, 100, 0.5, datetime(2026, 7, 5)))
         self.assertEqual(values[2], (1, "产品B", 100, 1, 100, 0.5, None))
         self.assertEqual(values[3], (3, "产品C", 0, 1, 0, 0, None))
+        self.assertEqual(share_format, "0.00%")
 
     def test_empty_platform_creates_header_only_workbook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,8 +171,8 @@ class DeliveryStatisticsTests(unittest.TestCase):
             eleme_values = list(load_workbook(outputs["elemeData"], data_only=True).active.values)
             jd_values = list(load_workbook(outputs["jdData"], data_only=True).active.values)
 
-        self.assertEqual(mt_values[1], (1, "产品A", 20, 100, 1, 5, 1, datetime(2026, 7, 5)))
-        self.assertEqual(eleme_values[1], (1, "产品A", 30, 60, 1, 2, 1, datetime(2026, 7, 8)))
+        self.assertEqual(mt_values[1], (1, "产品A", 16.6667, 100, 1, 6, 1, datetime(2026, 7, 5)))
+        self.assertEqual(eleme_values[1], (1, "产品A", 20, 60, 1, 3, 1, datetime(2026, 7, 8)))
         self.assertEqual(jd_values[1], (1, "产品A", 80, 1, 80, 1, datetime(2026, 7, 5)))
 
 

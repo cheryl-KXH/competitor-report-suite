@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -265,7 +265,7 @@ def _store_sale_days(row: RawSaleRow, lookup: dict[tuple[str, str, str], Annotat
             f"平台={platform}，品牌={row.brand}，产品={row.product}，"
             f"上架日期={launch_date:%Y-%m-%d}，抓取日期={row.crawl_date:%Y-%m-%d}"
         )
-    return max(1, min(difference, SALES_WINDOW_DAYS))
+    return min(difference + 1, SALES_WINDOW_DAYS)
 
 
 def _platform_delivery_metrics(
@@ -343,7 +343,7 @@ def generate_platform_delivery_summary(
         [
             "排名",
             "商品名称",
-            f"{platform_name}日店均销量",
+            "日店均销量",
             "总销量",
             "总销量占比",
             "总在售天数",
@@ -361,7 +361,7 @@ def generate_platform_delivery_summary(
             [
                 rank,
                 item["product"],
-                round(item["daily_store_avg"], 1),
+                round(item["daily_store_avg"], 4),
                 item["sales"],
                 item["sales"] / total_sales if total_sales else 0.0,
                 item["sale_days"],
@@ -370,11 +370,11 @@ def generate_platform_delivery_summary(
             ]
         )
     for cell in ws["C"][1:]:
-        cell.number_format = "0.0"
+        cell.number_format = "0.0000"
     for cell in ws["D"][1:]:
         cell.number_format = "#,##0"
     for cell in ws["E"][1:]:
-        cell.number_format = "0.0%"
+        cell.number_format = "0.00%"
     for cell in ws["F"][1:]:
         cell.number_format = "#,##0"
     for cell in ws["G"][1:]:
@@ -436,81 +436,8 @@ def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[Annotation
     for cell in ws["E"][1:]:
         cell.number_format = "0.0"
     for cell in ws["F"][1:]:
-        cell.number_format = "0.0%"
+        cell.number_format = "0.00%"
     for cell in ws["G"][1:]:
         cell.number_format = "yyyy-mm-dd"
     return save_workbook(wb, output_path)
 
-
-def _sheet_values(ws) -> list[list[Any]]:
-    return [[cell for cell in row] for row in ws.iter_rows(values_only=True)]
-
-
-def _find_label_columns(header: list[Any]) -> tuple[int | None, int | None, int | None]:
-    normalized = [normalize_text(cell) for cell in header]
-    sentiment_idx = next((i for i, name in enumerate(normalized) if name in {"好评", "差评", "情感", "评价类型"}), None)
-    tag_idx = next((i for i, name in enumerate(normalized) if "标签" in name or name in {"关键词", "评价关键词"}), None)
-    product_idx = next((i for i, name in enumerate(normalized) if name in {"产品", "新品", "商品名称", "宝贝名称"}), None)
-    return sentiment_idx, tag_idx, product_idx
-
-
-def _infer_social_rows(ws) -> list[tuple[str, str, str]]:
-    values = _sheet_values(ws)
-    if not values:
-        return []
-    sentiment_idx = tag_idx = product_idx = None
-    start = 0
-    for idx, row in enumerate(values[:10]):
-        sentiment_idx, tag_idx, product_idx = _find_label_columns(row)
-        if tag_idx is not None:
-            start = idx + 1
-            break
-    rows: list[tuple[str, str, str]] = []
-    if tag_idx is not None:
-        for row in values[start:]:
-            tag = normalize_text(row[tag_idx]) if tag_idx < len(row) else ""
-            if not tag:
-                continue
-            sentiment = normalize_text(row[sentiment_idx]) if sentiment_idx is not None and sentiment_idx < len(row) else ""
-            product = normalize_text(row[product_idx]) if product_idx is not None and product_idx < len(row) else ""
-            rows.append((product, sentiment or "未标注", tag))
-        return rows
-
-    # Fallback for manually arranged sheets where first columns are good/bad labels.
-    current_sentiment = "好评"
-    for row in values:
-        for cell in row:
-            text = normalize_text(cell)
-            if text in {"好评", "差评"}:
-                current_sentiment = text
-                continue
-            if text and text not in {"暂无有效数据", "/"}:
-                rows.append(("", current_sentiment, text))
-    return rows
-
-
-def generate_social_summaries(input_dir: Path, output_dir: Path, social_rules: dict[str, Any]) -> dict[str, Path]:
-    platform_outputs: dict[str, Path] = {}
-    for key, rule in social_rules.items():
-        label = str(rule.get("label") or key)
-        sheet_names = set(rule.get("sheetNames") or [label])
-        counter: Counter[tuple[str, str, str]] = Counter()
-        for path in find_workbooks(input_dir):
-            wb = load_workbook(path, read_only=True, data_only=True)
-            for ws in wb.worksheets:
-                if ws.title not in sheet_names:
-                    continue
-                for product, sentiment, tag in _infer_social_rows(ws):
-                    counter[(product, sentiment, tag)] += 1
-        wb = Workbook()
-        ws = wb.active
-        ws.title = label
-        ws.append(["产品", "情感", "标签", "评论数"])
-        if counter:
-            for (product, sentiment, tag), count in sorted(counter.items(), key=lambda item: (item[0][0], item[0][1], -item[1], item[0][2])):
-                ws.append([product, sentiment, tag, count])
-        else:
-            ws.append(["", "暂无有效数据", "暂无有效数据", 0])
-        path = output_dir / f"{label}.xlsx"
-        platform_outputs[key] = save_workbook(wb, path)
-    return platform_outputs

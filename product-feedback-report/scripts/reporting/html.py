@@ -1,3 +1,5 @@
+"""HTML 跟踪报告排版。"""
+
 from __future__ import annotations
 
 import html
@@ -89,4 +91,3 @@ def build_report_html(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")
     return output_path
-

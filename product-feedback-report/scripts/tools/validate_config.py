@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -35,7 +35,7 @@ def main() -> int:
         print("配置提醒：")
         for warning in warnings:
             print(f"- {warning}")
-    else:
+    if not warnings:
         print("配置检查通过。")
     return 0
 

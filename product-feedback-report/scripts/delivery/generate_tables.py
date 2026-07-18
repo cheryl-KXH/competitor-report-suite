@@ -5,12 +5,12 @@ import argparse
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from service.config import load_configs, output_root
-from scripts.data_processing import find_delivery_rows, generate_jd_summary, generate_platform_delivery_summary, read_annotation
+from scripts.delivery.processing import find_delivery_rows, generate_jd_summary, generate_platform_delivery_summary, read_annotation
 
 
 def generate_delivery_tables(record_id: str, input_dir: Path, annotation_path: Path, output_dir: Path | None = None) -> dict[str, Path]:

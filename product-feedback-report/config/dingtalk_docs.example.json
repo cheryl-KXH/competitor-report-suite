@@ -4,9 +4,10 @@
   "workspaceId": "",
   "rootFolderId": "",
   "rootFolderPath": [],
+  "localUploadRootFolderId": "",
+  "localUploadRootFolderName": "原始文件：竞品新品跟踪反馈",
   "notes": [
     "复制为 config/dingtalk_docs.json 后填写真实钉钉文档 MCP 配置。",
-    "第一版可先本地调试，上传下载能力后续按实际 MCP 返回结构微调。"
+    "AI 表本地上传附件没有钉钉文档父目录时，优先使用 localUploadRootFolderId，否则按 localUploadRootFolderName 查找既有归档根目录。"
   ]
 }
-
