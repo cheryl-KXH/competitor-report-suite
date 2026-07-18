@@ -191,6 +191,61 @@ def combine_delivery_sales(
 ) -> DeliveryReport:
     meituan, meituan_stores = read_platform_sales(meituan_path, "美团")
     eleme, eleme_stores = read_platform_sales(eleme_path, "饿了么")
+    return combine_delivery_models(
+        meituan,
+        eleme,
+        tracked_products,
+        meituan_stores=meituan_stores,
+        eleme_stores=eleme_stores,
+    )
+
+
+def delivery_report_from_metrics(
+    meituan_metrics: list[dict[str, Any]],
+    eleme_metrics: list[dict[str, Any]],
+    tracked_products: list[str],
+) -> DeliveryReport:
+    def convert(metrics: list[dict[str, Any]]) -> tuple[dict[str, PlatformSale], int]:
+        sales: dict[str, PlatformSale] = {}
+        max_stores = 0
+        for item in metrics:
+            product = _text(item.get("product"))
+            if not product:
+                continue
+            key = normalize_product_key(product)
+            stores = _integer(item.get("stores"))
+            sales[key] = PlatformSale(
+                product=product,
+                daily_store_avg=_number(item.get("daily_store_avg")),
+                total_sales=_number(item.get("sales")),
+                stores=stores,
+            )
+            max_stores = max(max_stores, stores)
+        return sales, max_stores
+
+    meituan, meituan_stores = convert(meituan_metrics)
+    eleme, eleme_stores = convert(eleme_metrics)
+    if not meituan:
+        raise RuntimeError("美团外卖数据没有有效商品。")
+    if not eleme:
+        raise RuntimeError("饿了么外卖数据没有有效商品。")
+    return combine_delivery_models(
+        meituan,
+        eleme,
+        tracked_products,
+        meituan_stores=meituan_stores,
+        eleme_stores=eleme_stores,
+    )
+
+
+def combine_delivery_models(
+    meituan: dict[str, PlatformSale],
+    eleme: dict[str, PlatformSale],
+    tracked_products: list[str],
+    *,
+    meituan_stores: int,
+    eleme_stores: int,
+) -> DeliveryReport:
     keys = set(meituan) | set(eleme)
     names = {
         key: (meituan.get(key) or eleme[key]).product
@@ -247,6 +302,33 @@ def combine_delivery_sales(
         meituan_stores=meituan_stores,
         eleme_stores=eleme_stores,
     )
+
+
+def jd_report_from_metrics(
+    metrics: list[dict[str, Any]],
+) -> tuple[tuple[JdSale, ...], float]:
+    total = sum(_number(item.get("sales")) for item in metrics)
+    rows: list[JdSale] = []
+    previous_sales: float | None = None
+    previous_rank = 0
+    for index, item in enumerate(
+        sorted(metrics, key=lambda value: (-_number(value.get("sales")), _text(value.get("product")))),
+        1,
+    ):
+        sales = _number(item.get("sales"))
+        rank = previous_rank if previous_sales is not None and sales == previous_sales else index
+        previous_sales = sales
+        previous_rank = rank
+        if rank <= 20:
+            rows.append(
+                JdSale(
+                    rank=rank,
+                    product=_text(item.get("product")),
+                    total_sales=sales,
+                    share=sales / total if total else 0.0,
+                )
+            )
+    return tuple(rows), total
 
 
 def read_jd_sales(path: Path | None) -> tuple[tuple[JdSale, ...], float]:
@@ -352,6 +434,41 @@ def read_social_report(path: Path) -> SocialReport:
         negative_users=sum(section.negative_users for section in sections),
         positive_top=_counter_top(positive_counter, generic_positive),
         negative_top=_counter_top(negative_counter, generic_negative),
+    )
+
+
+def social_report_from_summaries(
+    *, title: str, period: str, summaries: list[Any]
+) -> SocialReport:
+    sections = tuple(
+        SocialSection(
+            label=_text(summary.label),
+            positive_tags=tuple(summary.positive_tags),
+            negative_tags=tuple(summary.negative_tags),
+            positive_users=int(summary.positive_users),
+            negative_users=int(summary.negative_users),
+        )
+        for summary in summaries
+    )
+    positive_counter: Counter[str] = Counter()
+    negative_counter: Counter[str] = Counter()
+    for section in sections:
+        positive_counter.update(dict(section.positive_tags))
+        negative_counter.update(dict(section.negative_tags))
+    return SocialReport(
+        title=title,
+        period=period,
+        sections=sections,
+        positive_users=sum(section.positive_users for section in sections),
+        negative_users=sum(section.negative_users for section in sections),
+        positive_top=_counter_top(
+            positive_counter,
+            {normalize_product_key(value) for value in GENERIC_POSITIVE_TAGS},
+        ),
+        negative_top=_counter_top(
+            negative_counter,
+            {normalize_product_key(value) for value in GENERIC_NEGATIVE_TAGS},
+        ),
     )
 
 
@@ -563,20 +680,30 @@ def build_report_html(
     brand: str,
     products: list[str],
     report_date: date,
-    meituan_path: Path,
-    eleme_path: Path,
+    meituan_path: Path | None,
+    eleme_path: Path | None,
     jd_path: Path | None,
     social_paths: dict[str, Path],
     product_infos: dict[str, ProductInfo],
     launch_dates: dict[str, date | None],
     output_path: Path,
     configs: dict[str, dict[str, Any]],
+    delivery_report: DeliveryReport | None = None,
+    jd_report: tuple[tuple[JdSale, ...], float] | None = None,
+    social_report_models: dict[str, SocialReport] | None = None,
 ) -> ReportBuildResult:
     warnings: list[str] = []
-    delivery = combine_delivery_sales(meituan_path, eleme_path, products)
-    jd_rows, jd_total = read_jd_sales(jd_path)
-    social_reports: dict[str, SocialReport] = {}
+    if delivery_report is None:
+        if not meituan_path or not eleme_path:
+            raise RuntimeError("生成报告缺少美团或饿了么数据。")
+        delivery = combine_delivery_sales(meituan_path, eleme_path, products)
+    else:
+        delivery = delivery_report
+    jd_rows, jd_total = jd_report or read_jd_sales(jd_path)
+    social_reports: dict[str, SocialReport] = dict(social_report_models or {})
     for product, path in social_paths.items():
+        if product in social_reports:
+            continue
         try:
             social_reports[product] = read_social_report(path)
         except Exception as exc:

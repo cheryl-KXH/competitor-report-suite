@@ -164,6 +164,7 @@ def mark_running(configs: dict[str, dict[str, Any]], record_id: str) -> None:
     fields = _field_ids(configs)
     cells = {
         fields["status"]: status_cell(configs, "等待1-2分钟"),
+        fields["reportUrl"]: "",
         fields["generatedAt"]: "",
     }
     feedback_field = feedback_field_id(configs)

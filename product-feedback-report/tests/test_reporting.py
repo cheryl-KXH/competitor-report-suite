@@ -11,8 +11,11 @@ from scripts.reporting.html import (
     ProductInfo,
     build_report_html,
     combine_delivery_sales,
+    delivery_report_from_metrics,
+    jd_report_from_metrics,
     read_jd_sales,
     read_social_report,
+    social_report_from_summaries,
 )
 from scripts.social.processing import PlatformSummary, build_social_feedback_workbook
 
@@ -134,6 +137,48 @@ class ReportingTests(unittest.TestCase):
         self.assertNotIn(">/</td>", document)
         self.assertNotIn(">0</td>", document)
         self.assertNotIn("file://", document)
+        self.assertIn("新品销量表现（30日）", document)
+
+    def test_html_accepts_in_memory_statistics_without_intermediate_files(self) -> None:
+        delivery = delivery_report_from_metrics(
+            [{"product": "新品", "daily_store_avg": 1.2, "sales": 120, "stores": 5}],
+            [{"product": "新品", "daily_store_avg": 1.4, "sales": 140, "stores": 6}],
+            ["新品"],
+        )
+        jd = jd_report_from_metrics([])
+        social = social_report_from_summaries(
+            title="品牌-新品 消费者反馈",
+            period="6.18-7.18",
+            summaries=[
+                PlatformSummary(key, label, (), (), 0, 0)
+                for key, label in (
+                    ("weibo", "微博"),
+                    ("xiaohongshu", "小红书"),
+                    ("douyin", "抖音"),
+                    ("bilibili", "B站"),
+                )
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "报告.html"
+            build_report_html(
+                title="报告",
+                brand="品牌",
+                products=["新品"],
+                report_date=date(2026, 7, 18),
+                meituan_path=None,
+                eleme_path=None,
+                jd_path=None,
+                social_paths={},
+                product_infos={"新品": ProductInfo("新品")},
+                launch_dates={"新品": date(2026, 6, 18)},
+                output_path=output,
+                configs={"html_layout": {}, "font_files": {}},
+                delivery_report=delivery,
+                jd_report=jd,
+                social_report_models={"新品": social},
+            )
+            document = output.read_text(encoding="utf-8")
         self.assertIn("新品销量表现（30日）", document)
 
 

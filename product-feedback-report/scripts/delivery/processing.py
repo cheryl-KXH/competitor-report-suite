@@ -287,7 +287,7 @@ def _product_sale_days(
     return min(difference + 1, SALES_WINDOW_DAYS)
 
 
-def _platform_delivery_metrics(
+def platform_delivery_metrics(
     raw_rows: list[RawSaleRow], annotations: list[AnnotationRow], platform_name: str
 ) -> list[dict[str, Any]]:
     lookup = _annotation_lookup(annotations)
@@ -327,10 +327,49 @@ def _platform_delivery_metrics(
     return metrics
 
 
+# Backwards-compatible alias for internal callers and older tests.
+_platform_delivery_metrics = platform_delivery_metrics
+
+
+def jd_delivery_metrics(
+    raw_rows: list[RawSaleRow], annotations: list[AnnotationRow]
+) -> list[dict[str, Any]]:
+    lookup = _annotation_lookup(annotations)
+    grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {"sales_sum": 0.0, "stores": 0, "crawl_date": None}
+    )
+    for row in _latest_store_product_rows(raw_rows, "京东"):
+        data = grouped[(row.brand, row.product)]
+        data["sales_sum"] += row.monthly_sales
+        data["stores"] += 1
+        if data["crawl_date"] is None or row.crawl_date > data["crawl_date"]:
+            data["crawl_date"] = row.crawl_date
+    metrics = []
+    for (brand, product), data in grouped.items():
+        annotation = lookup.get(("京东", brand, product))
+        launch_date = annotation.recent_launch_date if annotation else None
+        stores = data["stores"]
+        metrics.append(
+            {
+                "brand": brand,
+                "product": product,
+                "sales_sum": data["sales_sum"],
+                "stores": stores,
+                "sales": data["sales_sum"] / stores if stores else 0.0,
+                "days_on_sale": _product_sale_days(
+                    "京东", brand, product, data["crawl_date"], launch_date
+                ),
+                "launch_date": launch_date,
+            }
+        )
+    metrics.sort(key=lambda item: (-item["sales"], item["product"], item["brand"]))
+    return metrics
+
+
 def generate_delivery_summary(raw_rows: list[RawSaleRow], annotations: list[AnnotationRow], output_path: Path) -> Path:
     product_rows: dict[str, dict[str, Any]] = defaultdict(dict)
     for platform in ("美团", "饿了么"):
-        for metric in _platform_delivery_metrics(raw_rows, annotations, platform):
+        for metric in platform_delivery_metrics(raw_rows, annotations, platform):
             product_rows[metric["product"]][platform] = metric
     total_avg = sum(sum(p.get(platform, {}).get("daily_store_avg", 0.0) for platform in ("美团", "饿了么")) for p in product_rows.values())
     ranked = []
@@ -358,7 +397,7 @@ def generate_platform_delivery_summary(
     platform_name: str,
     output_path: Path,
 ) -> Path:
-    metrics = _platform_delivery_metrics(raw_rows, annotations, platform_name)
+    metrics = platform_delivery_metrics(raw_rows, annotations, platform_name)
     total_sales = sum(item["sales"] for item in metrics)
     metrics.sort(key=lambda item: (-item["sales"], item["product"], item["brand"]))
 
@@ -415,44 +454,8 @@ def generate_platform_delivery_summary(
 
 
 def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[AnnotationRow], output_path: Path) -> Path:
-    lookup = _annotation_lookup(annotations)
-    grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
-        lambda: {"sales_sum": 0.0, "stores": 0, "crawl_date": None}
-    )
-    for row in _latest_store_product_rows(raw_rows, "京东"):
-        data = grouped[(row.brand, row.product)]
-        data["sales_sum"] += row.monthly_sales
-        data["stores"] += 1
-        if data["crawl_date"] is None or row.crawl_date > data["crawl_date"]:
-            data["crawl_date"] = row.crawl_date
-    metrics = [
-        {
-            "brand": brand,
-            "product": product,
-            "sales_sum": data["sales_sum"],
-            "stores": data["stores"],
-            "sales": data["sales_sum"] / data["stores"],
-            "days_on_sale": _product_sale_days(
-                "京东",
-                brand,
-                product,
-                data["crawl_date"],
-                (
-                    lookup.get(("京东", brand, product)).recent_launch_date
-                    if lookup.get(("京东", brand, product))
-                    else None
-                ),
-            ),
-            "launch_date": (
-                lookup.get(("京东", brand, product)).recent_launch_date
-                if lookup.get(("京东", brand, product))
-                else None
-            ),
-        }
-        for (brand, product), data in grouped.items()
-    ]
+    metrics = jd_delivery_metrics(raw_rows, annotations)
     total_sales = sum(item["sales"] for item in metrics)
-    metrics.sort(key=lambda item: (-item["sales"], item["product"], item["brand"]))
     wb = Workbook()
     ws = wb.active
     ws.title = "京东外卖数据"

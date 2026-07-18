@@ -237,6 +237,8 @@ python scripts/generate_weekly_report.py --explain-config
 
 按钮生成走本机 FastAPI 服务，适合配合 ngrok 暴露给钉钉调用。
 
+钉钉 HTTP 任务会在系统临时目录生成 Excel、HTML 和 PNG，上传钉钉文档后自动清理，不会在本机 `outputs/` 留副本。直接运行 `scripts/generate_weekly_outputs.py` 等命令行任务时，仍按 `config/image_layout.json` 写入本机 `outputs/`。
+
 无密钥模式：
 
 ```bash

@@ -4,6 +4,8 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import ExitStack
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -15,6 +17,7 @@ from service.jobs import (
     _empty_delivery_platforms,
     _ensure_dingtalk_input_attachment,
     _ensure_local_upload_folder,
+    _prepare_delivery_run_inputs,
     _single_ai_table_attachment,
     _single_local_xlsx,
     _task_annotation_path,
@@ -23,9 +26,11 @@ from service.jobs import (
     _task_folder_name,
     run_generate_delivery_tables,
     run_generate_report,
+    run_finalize_report,
     run_prepare_product_menu,
 )
 from scripts.reporting.html import ReportBuildResult
+from scripts.social.processing import normalize_social_product_key
 
 
 class DeliveryJobTests(unittest.TestCase):
@@ -43,6 +48,54 @@ class DeliveryJobTests(unittest.TestCase):
         if product is not None:
             ws.append([1, product, sales])
         wb.save(path)
+
+    def test_report_step_three_describes_manual_product_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            delivery = root / "delivery.xlsx"
+            menu = root / "menu.xlsx"
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "deliveryData": [{"resourceId": "delivery", "name": delivery.name, "url": "https://ai/delivery"}],
+                    "productMenu": [{"resourceId": "menu", "name": menu.name, "url": "https://ai/menu"}],
+                },
+            )
+            messages: list[str] = []
+            with (
+                patch("service.jobs._download_uploaded_xlsx", side_effect=[delivery, menu]),
+                patch("service.jobs.find_delivery_rows", return_value=[MagicMock()]),
+            ):
+                _prepare_delivery_run_inputs(
+                    {}, record, root / "workspace", progress_callback=messages.append
+                )
+        self.assertEqual(messages, ["3/6 正在读取人工配置的产品清单"])
+
+    def test_report_step_three_describes_automatic_annotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            delivery = root / "delivery.xlsx"
+            generated = root / "generated-menu.xlsx"
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "deliveryData": [{"resourceId": "delivery", "name": delivery.name, "url": "https://ai/delivery"}],
+                    "productMenu": [],
+                },
+            )
+            messages: list[str] = []
+            with (
+                patch("service.jobs._download_uploaded_xlsx", return_value=delivery),
+                patch("service.jobs.find_delivery_rows", return_value=[MagicMock()]),
+                patch("service.jobs.prepare_product_menu", return_value=generated),
+            ):
+                _prepare_delivery_run_inputs(
+                    {}, record, root / "workspace", progress_callback=messages.append
+                )
+        self.assertEqual(
+            messages,
+            ["3/6 正在自动标注在售不满30天的产品上新日期"],
+        )
 
     def test_report_job_uses_only_current_row_products_and_writes_existing_report_field(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,21 +154,38 @@ class DeliveryJobTests(unittest.TestCase):
                     "unrelated": unrelated_social,
                 }.get(link)
 
-            with (
-                patch("service.jobs.load_configs", return_value=configs),
-                patch("service.jobs.dingtalk_table.mark_status"),
-                patch("service.jobs.dingtalk_table.fetch_record", return_value=main_record),
-                patch(
+            with ExitStack() as stack:
+                stack.enter_context(patch("service.jobs.load_configs", return_value=configs))
+                stack.enter_context(patch("service.jobs.dingtalk_table.mark_status"))
+                stack.enter_context(patch("service.jobs.dingtalk_table.fetch_record", return_value=main_record))
+                stack.enter_context(patch(
                     "service.jobs.dingtalk_table.fetch_records",
                     return_value=[social_record, unrelated_record],
-                ),
-                patch("service.jobs._ensure_local_upload_folder", return_value="dated-folder") as ensure_folder,
-                patch("service.jobs.dingtalk_docs.download_linked_file", side_effect=download),
-                patch("service.jobs.generate_report", return_value=ReportBuildResult(output, ("图片缺失",))) as generate,
-                patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report") as upload,
-                patch("service.jobs.dingtalk_table.mark_links") as mark_links,
-                patch("service.jobs.dingtalk_table.update_feedback") as update_feedback,
-            ):
+                ))
+                ensure_folder = stack.enter_context(patch("service.jobs._ensure_local_upload_folder", return_value="dated-folder"))
+                stack.enter_context(patch(
+                    "service.jobs._prepare_delivery_run_inputs",
+                    return_value=(root, root / "产品清单.xlsx", [object()]),
+                ))
+                stack.enter_context(patch("service.jobs.read_annotation", return_value=[]))
+                stack.enter_context(patch("service.jobs.platform_delivery_metrics", side_effect=[[{"product": "A"}], [{"product": "A"}]]))
+                stack.enter_context(patch("service.jobs.jd_delivery_metrics", return_value=[]))
+                stack.enter_context(patch("service.jobs.delivery_report_from_metrics", return_value=MagicMock()))
+                stack.enter_context(patch("service.jobs.jd_report_from_metrics", return_value=((), 0.0)))
+                generate_delivery = stack.enter_context(patch(
+                    "service.jobs.generate_delivery_tables",
+                    return_value={"meituanData": mt, "elemeData": elm, "jdData": root / "京东.xlsx"},
+                ))
+                stack.enter_context(patch("service.jobs._empty_delivery_platforms", return_value=["京东"]))
+                stack.enter_context(patch("service.jobs._filter_links_for_existing_fields", side_effect=lambda _configs, links: links))
+                stack.enter_context(patch("service.jobs._matching_social_records", return_value={}))
+                stack.enter_context(patch("service.jobs._collect_social_inputs", return_value={}))
+                generate_social = stack.enter_context(patch("service.jobs._generate_social_outputs", return_value=({}, {})))
+                download_linked = stack.enter_context(patch("service.jobs.dingtalk_docs.download_linked_file"))
+                generate = stack.enter_context(patch("service.jobs.generate_report", return_value=ReportBuildResult(output, ("图片缺失",))))
+                upload = stack.enter_context(patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report"))
+                mark_links = stack.enter_context(patch("service.jobs.dingtalk_table.mark_links"))
+                update_feedback = stack.enter_context(patch("service.jobs.dingtalk_table.update_feedback"))
                 result = run_generate_report("record")
 
         grouped_record = ensure_folder.call_args.args[1]
@@ -126,20 +196,35 @@ class DeliveryJobTests(unittest.TestCase):
         )
         self.assertEqual(generate.call_args.args[2], ["糯青山柠檬奶", "雾红尘柠檬奶"])
         self.assertNotIn("不应进入报告", generate.call_args.args[2])
-        upload.assert_called_once_with({}, output, "dated-folder")
-        self.assertEqual(mark_links.call_args.args[2], {"report": (output.name, "https://example/report")})
+        download_linked.assert_not_called()
+        self.assertEqual(upload.call_args_list[-1], call({}, output, "dated-folder"))
+        self.assertEqual(mark_links.call_args_list[-1].args[2], {"report": (output.name, "https://example/report")})
         self.assertIn("图片缺失", update_feedback.call_args.args[2])
+        feedback_messages = [item.args[2] for item in update_feedback.call_args_list]
         self.assertEqual(
-            [item.args[2] for item in update_feedback.call_args_list],
+            feedback_messages[:5],
             [
-                "1/4 正在读取当前行的品牌、报告日期和关注新品",
-                "2/4 正在下载外卖数表和关注新品的社媒评论统计表",
-                "3/4 正在查找关注新品的产品信息并生成跟踪报告",
-                "4/4 正在上传跟踪报告到钉钉文档",
-                "报告已生成；部分资料暂无法获取：图片缺失",
+                "1/6 正在读取品牌、新品及报告日期",
+                "2/6 正在读取上传的外卖及社媒数据",
+                "4/6 正在进行外卖及社媒数据统计",
+                "5/6 正在生成跟踪反馈报告",
+                "6/6 正在上传至钉钉文档",
             ],
         )
-        self.assertEqual(result["warnings"], ["图片缺失"])
+        self.assertIn("图片缺失", feedback_messages[-1])
+        self.assertIn("图片缺失", result["warnings"])
+        configured_outputs = (root / "outputs").resolve()
+        temporary_paths = (
+            Path(generate_delivery.call_args.args[3]),
+            Path(generate_social.call_args.args[3]),
+            Path(generate.call_args.kwargs["output_dir"]),
+        )
+        self.assertTrue(
+            all(not path.resolve().is_relative_to(configured_outputs) for path in temporary_paths)
+        )
+        self.assertTrue(all(not path.exists() for path in temporary_paths))
+        self.assertIsNone(result["output"])
+        self.assertEqual(result["outputFile"], output.name)
 
     def test_report_job_failure_feedback_names_the_active_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,20 +253,15 @@ class DeliveryJobTests(unittest.TestCase):
 
             for failed_stage, expected_stage in (
                 ("read", "读取当前行信息"),
-                ("download", "下载资料"),
+                ("download", "读取原始附件"),
                 ("generate", "生成报告"),
                 ("upload", "上传报告"),
             ):
                 with self.subTest(stage=failed_stage):
-                    def download(_config, value, _output_dir):
-                        if failed_stage == "download":
-                            raise RuntimeError("模拟下载失败")
-                        return {"mt": mt, "elm": elm}.get(value.get("link"))
-
-                    with (
-                        patch("service.jobs.load_configs", return_value=configs),
-                        patch("service.jobs.dingtalk_table.mark_status"),
-                        patch(
+                    with ExitStack() as stack:
+                        stack.enter_context(patch("service.jobs.load_configs", return_value=configs))
+                        stack.enter_context(patch("service.jobs.dingtalk_table.mark_status"))
+                        stack.enter_context(patch(
                             "service.jobs.dingtalk_table.fetch_record",
                             side_effect=(
                                 RuntimeError("模拟读取失败")
@@ -189,11 +269,32 @@ class DeliveryJobTests(unittest.TestCase):
                                 else None
                             ),
                             return_value=record,
-                        ),
-                        patch("service.jobs.dingtalk_table.fetch_records", return_value=[]),
-                        patch("service.jobs._ensure_local_upload_folder", return_value="folder"),
-                        patch("service.jobs.dingtalk_docs.download_linked_file", side_effect=download),
-                        patch(
+                        ))
+                        stack.enter_context(patch("service.jobs.dingtalk_table.fetch_records", return_value=[]))
+                        stack.enter_context(patch("service.jobs._ensure_local_upload_folder", return_value="folder"))
+                        stack.enter_context(patch(
+                            "service.jobs._prepare_delivery_run_inputs",
+                            side_effect=(
+                                RuntimeError("模拟下载失败")
+                                if failed_stage == "download"
+                                else None
+                            ),
+                            return_value=(root, root / "menu.xlsx", [object()]),
+                        ))
+                        stack.enter_context(patch("service.jobs.read_annotation", return_value=[]))
+                        stack.enter_context(patch("service.jobs.platform_delivery_metrics", side_effect=[[{"product": "A"}], [{"product": "A"}]]))
+                        stack.enter_context(patch("service.jobs.jd_delivery_metrics", return_value=[]))
+                        stack.enter_context(patch("service.jobs.delivery_report_from_metrics", return_value=MagicMock()))
+                        stack.enter_context(patch("service.jobs.jd_report_from_metrics", return_value=((), 0.0)))
+                        stack.enter_context(patch(
+                            "service.jobs.generate_delivery_tables",
+                            return_value={"meituanData": mt, "elemeData": elm, "jdData": root / "jd.xlsx"},
+                        ))
+                        stack.enter_context(patch("service.jobs._empty_delivery_platforms", return_value=["美团", "饿了么", "京东"]))
+                        stack.enter_context(patch("service.jobs._matching_social_records", return_value={}))
+                        stack.enter_context(patch("service.jobs._collect_social_inputs", return_value={}))
+                        stack.enter_context(patch("service.jobs._generate_social_outputs", return_value=({}, {})))
+                        stack.enter_context(patch(
                             "service.jobs.generate_report",
                             side_effect=(
                                 RuntimeError("模拟生成失败")
@@ -201,8 +302,8 @@ class DeliveryJobTests(unittest.TestCase):
                                 else None
                             ),
                             return_value=ReportBuildResult(output, ()),
-                        ),
-                        patch(
+                        ))
+                        stack.enter_context(patch(
                             "service.jobs.dingtalk_docs.upload_file",
                             side_effect=(
                                 RuntimeError("模拟上传失败")
@@ -210,11 +311,10 @@ class DeliveryJobTests(unittest.TestCase):
                                 else None
                             ),
                             return_value="https://example/report",
-                        ),
-                        patch("service.jobs.dingtalk_table.mark_links"),
-                        patch("service.jobs.dingtalk_table.update_feedback"),
-                        patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
-                    ):
+                        ))
+                        stack.enter_context(patch("service.jobs.dingtalk_table.mark_links"))
+                        stack.enter_context(patch("service.jobs.dingtalk_table.update_feedback"))
+                        mark_failed = stack.enter_context(patch("service.jobs.dingtalk_table.mark_failed"))
                         with self.assertRaises(RuntimeError):
                             run_generate_report("record")
 
@@ -280,37 +380,134 @@ class DeliveryJobTests(unittest.TestCase):
             def download(_config, value, _output_dir):
                 return {"mt": mt, "elm": elm}.get(value.get("link"))
 
-            with (
-                patch("service.jobs.load_configs", return_value=configs),
-                patch("service.jobs.dingtalk_table.mark_status"),
-                patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-                patch("service.jobs.dingtalk_table.fetch_records", return_value=[]),
-                patch("service.jobs._ensure_local_upload_folder", return_value="folder"),
-                patch("service.jobs.dingtalk_docs.download_linked_file", side_effect=download),
-                patch(
+            with ExitStack() as stack:
+                stack.enter_context(patch("service.jobs.load_configs", return_value=configs))
+                stack.enter_context(patch("service.jobs.dingtalk_table.mark_status"))
+                stack.enter_context(patch("service.jobs.dingtalk_table.fetch_record", return_value=record))
+                stack.enter_context(patch("service.jobs.dingtalk_table.fetch_records", return_value=[]))
+                stack.enter_context(patch("service.jobs._ensure_local_upload_folder", return_value="folder"))
+                stack.enter_context(patch(
+                    "service.jobs._prepare_delivery_run_inputs",
+                    return_value=(root, root / "menu.xlsx", [object()]),
+                ))
+                stack.enter_context(patch("service.jobs.read_annotation", return_value=[]))
+                stack.enter_context(patch("service.jobs.platform_delivery_metrics", side_effect=[[{"product": "A"}], [{"product": "A"}]]))
+                stack.enter_context(patch("service.jobs.jd_delivery_metrics", return_value=[]))
+                stack.enter_context(patch("service.jobs.delivery_report_from_metrics", return_value=MagicMock()))
+                stack.enter_context(patch("service.jobs.jd_report_from_metrics", return_value=((), 0.0)))
+                stack.enter_context(patch(
+                    "service.jobs.generate_delivery_tables",
+                    return_value={"meituanData": mt, "elemeData": elm, "jdData": root / "jd.xlsx"},
+                ))
+                stack.enter_context(patch("service.jobs._empty_delivery_platforms", return_value=["京东"]))
+                stack.enter_context(patch("service.jobs._filter_links_for_existing_fields", side_effect=lambda _configs, links: links))
+                stack.enter_context(patch("service.jobs._matching_social_records", return_value={}))
+                stack.enter_context(patch("service.jobs._collect_social_inputs", return_value={}))
+                stack.enter_context(patch("service.jobs._generate_social_outputs", return_value=({}, {})))
+                stack.enter_context(patch(
                     "service.jobs.generate_report",
                     return_value=ReportBuildResult(output, ()),
-                ),
-                patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report"),
-                patch("service.jobs.dingtalk_table.mark_links") as mark_links,
-                patch(
+                ))
+                stack.enter_context(patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report"))
+                mark_links = stack.enter_context(patch("service.jobs.dingtalk_table.mark_links"))
+                stack.enter_context(patch(
                     "service.jobs.dingtalk_table.update_feedback",
-                    side_effect=[None, None, None, None, RuntimeError("反馈回写失败")],
-                ),
-                patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
-            ):
+                    side_effect=[None, None, None, None, None, RuntimeError("反馈回写失败")],
+                ))
+                mark_failed = stack.enter_context(patch("service.jobs.dingtalk_table.mark_failed"))
                 result = run_generate_report("record")
 
         self.assertTrue(result["ok"])
-        mark_links.assert_called_once()
+        self.assertEqual(mark_links.call_count, 2)
         mark_failed.assert_not_called()
 
-    def test_all_platform_results_use_link_cell_format(self) -> None:
+    def test_finalize_requires_existing_report_and_keeps_sources_untouched(self) -> None:
+        configs = {"dingtalk": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
+        record = dingtalk_table.TaskRecord(
+            "record",
+            {
+                "brand": {"name": "霸王茶姬"},
+                "productName": ["雾红尘柠檬奶"],
+                "launchDate": "2026-07-18",
+                "deliveryData": [{"resourceId": "raw", "name": "raw.xlsx", "url": "https://ai/raw"}],
+            },
+        )
+        with (
+            patch("service.jobs.load_configs", return_value=configs),
+            patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
+            patch("service.jobs._ensure_local_upload_folder") as ensure_folder,
+            patch("service.jobs.dingtalk_docs.upload_file") as upload,
+            patch("service.jobs.dingtalk_table.update_feedback"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "最终报告链接为空"):
+                run_finalize_report("record")
+        ensure_folder.assert_not_called()
+        upload.assert_not_called()
+
+    def test_finalize_archives_uploaded_sources_then_replaces_attachment_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            delivery = root / "random-sales.xlsx"
+            menu = root / "random-menu.xlsx"
+            social = root / "霸王茶姬-雾红尘柠檬奶-微博.xlsx"
+            for path in (delivery, menu, social):
+                path.write_bytes(self._xlsx_bytes())
+            configs = {"dingtalk": {}, "dingtalk_docs": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": ["雾红尘柠檬奶"],
+                    "launchDate": "2026-07-18",
+                    "report": {"text": "报告", "link": "https://docs/report"},
+                    "deliveryData": [{"resourceId": "raw", "name": delivery.name, "url": "https://ai/raw"}],
+                    "productMenu": [{"resourceId": "menu", "name": menu.name, "url": "https://ai/menu"}],
+                },
+            )
+            social_record = dingtalk_table.TaskRecord(
+                "social",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": "雾红尘柠檬奶",
+                    "launchDate": "2026-06-18",
+                    "day30": "2026-07-18",
+                    "weibo": [{"resourceId": "weibo", "name": "random.xlsx", "url": "https://ai/weibo"}],
+                },
+            )
+            product_key = normalize_social_product_key("雾红尘柠檬奶")
+
+            def download_uploaded(_configs, _record, field_key, _label, _target_dir, **_kwargs):
+                return {"deliveryData": delivery, "productMenu": menu}[field_key]
+
+            with (
+                patch("service.jobs.load_configs", return_value=configs),
+                patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
+                patch("service.jobs._ensure_local_upload_folder", return_value="folder"),
+                patch("service.jobs._matching_social_records", return_value={product_key: ("雾红尘柠檬奶", social_record, date(2026, 6, 18))}),
+                patch("service.jobs._download_uploaded_xlsx", side_effect=download_uploaded),
+                patch("service.jobs.find_delivery_rows", return_value=[MagicMock()]),
+                patch("service.jobs._primary_brand", return_value="霸王茶姬"),
+                patch("service.jobs._crawl_date", return_value=date(2026, 7, 16)),
+                patch("service.jobs._collect_social_inputs", return_value={product_key: {"weibo": social}}),
+                patch("service.jobs.dingtalk_docs.upload_file", side_effect=lambda _config, path, _folder: f"https://docs/{path.name}") as upload,
+                patch("service.jobs.dingtalk_table.update_attachment_fields") as update,
+                patch("service.jobs.dingtalk_table.update_feedback"),
+            ):
+                result = run_finalize_report("record")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(upload.call_count, 3)
+        main_links = update.call_args_list[0].args[2]
+        self.assertEqual(main_links["deliveryData"][0], "霸王茶姬-20260716.xlsx")
+        self.assertEqual(main_links["productMenu"][0], "霸王茶姬-20260716-产品清单.xlsx")
+        self.assertEqual(update.call_args_list[1].args[1], "social")
+
+    def test_product_menu_uses_attachment_and_platform_results_use_links(self) -> None:
         configs = {
             "dingtalk": {"baseId": "base", "tableId": "table"},
             "field_mapping": {
                 "fields": {
-                    "productMenu": {"fieldId": "menu", "cellType": "link"},
+                    "productMenu": {"fieldId": "menu", "cellType": "attachment"},
                     "meituanData": {"fieldId": "mt", "cellType": "link"},
                     "elemeData": {"fieldId": "elm", "cellType": "link"},
                     "jdData": {"fieldId": "jd", "cellType": "link"},
@@ -330,7 +527,10 @@ class DeliveryJobTests(unittest.TestCase):
             )
 
         cells = update_cells.call_args.args[2]
-        self.assertEqual(cells["productMenu"], {"text": "产品清单.xlsx", "link": "https://example/menu"})
+        self.assertEqual(
+            cells["productMenu"],
+            [{"url": "https://example/menu", "name": "产品清单.xlsx"}],
+        )
         self.assertEqual(cells["meituanData"], {"text": "美团.xlsx", "link": "https://example/mt"})
         self.assertEqual(cells["elemeData"], {"text": "饿了么.xlsx", "link": "https://example/elm"})
         self.assertEqual(cells["jdData"], {"text": "京东.xlsx", "link": "https://example/jd"})
@@ -419,7 +619,7 @@ class DeliveryJobTests(unittest.TestCase):
 
         self.assertEqual(fetch_record.call_count, 3)
 
-    def test_product_menu_job_stops_before_generation_when_link_clear_fails(self) -> None:
+    def test_product_menu_job_stops_before_generation_when_attachment_clear_fails(self) -> None:
         configs = {"dingtalk": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
         record = dingtalk_table.TaskRecord(
             "record",
@@ -431,21 +631,21 @@ class DeliveryJobTests(unittest.TestCase):
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
             patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
             patch(
-                "service.jobs.dingtalk_table.clear_link_fields",
-                side_effect=RuntimeError("旧结果链接清空失败，请刷新钉钉 AI 表后重试。"),
+                "service.jobs.dingtalk_table.clear_attachment_fields",
+                side_effect=RuntimeError("旧结果附件清空失败，请刷新钉钉 AI 表后重试。"),
             ),
             patch("service.jobs.prepare_product_menu") as prepare,
             patch("service.jobs.dingtalk_docs.upload_file") as upload,
             patch("service.jobs.dingtalk_table.update_feedback") as update_feedback,
             patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
         ):
-            with self.assertRaisesRegex(RuntimeError, "旧结果链接清空失败"):
+            with self.assertRaisesRegex(RuntimeError, "旧结果附件清空失败"):
                 run_prepare_product_menu("record")
 
         prepare.assert_not_called()
         upload.assert_not_called()
-        self.assertIn("旧结果链接清空失败", update_feedback.call_args.args[2])
-        self.assertIn("旧结果链接清空失败", mark_failed.call_args.args[2])
+        self.assertIn("旧结果附件清空失败", update_feedback.call_args.args[2])
+        self.assertIn("旧结果附件清空失败", mark_failed.call_args.args[2])
 
     def test_delivery_job_stops_before_generation_when_link_clear_fails(self) -> None:
         configs = {"dingtalk": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
@@ -594,7 +794,7 @@ class DeliveryJobTests(unittest.TestCase):
             [{"url": "https://docs/destination-copy", "name": downloaded.name}],
         )
 
-    def test_linked_product_menu_is_copied_and_written_back_as_link(self) -> None:
+    def test_linked_product_menu_is_copied_and_written_back_as_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             downloaded = root / "霸王茶姬-20260718-产品清单.xlsx"
@@ -602,7 +802,7 @@ class DeliveryJobTests(unittest.TestCase):
             configs = {
                 "dingtalk_docs": {},
                 "field_mapping": {
-                    "fields": {"productMenu": {"fieldId": "menu", "cellType": "link"}}
+                    "fields": {"productMenu": {"fieldId": "menu", "cellType": "attachment"}}
                 },
                 "report_rules": {"outputDirectory": str(root / "outputs")},
             }
@@ -628,7 +828,7 @@ class DeliveryJobTests(unittest.TestCase):
                     "service.jobs.dingtalk_docs.upload_file",
                     return_value="https://alidocs.dingtalk.com/i/nodes/new-menu-node",
                 ) as upload,
-                patch("service.jobs.dingtalk_table.update_link_fields") as update,
+                patch("service.jobs.dingtalk_table.update_attachment_fields") as update,
             ):
                 folder_id = _ensure_dingtalk_input_attachment(
                     configs, record, "productMenu", "产品清单", "dated-folder"
@@ -648,10 +848,12 @@ class DeliveryJobTests(unittest.TestCase):
         )
         self.assertEqual(
             record.cells["productMenu"],
-            {
-                "text": downloaded.name,
-                "link": "https://alidocs.dingtalk.com/i/nodes/new-menu-node",
-            },
+            [
+                {
+                    "url": "https://alidocs.dingtalk.com/i/nodes/new-menu-node",
+                    "name": downloaded.name,
+                }
+            ],
         )
 
     def test_ai_table_local_attachment_is_downloaded_promoted_and_written_back(self) -> None:
@@ -1171,14 +1373,16 @@ class DeliveryJobTests(unittest.TestCase):
                 patch("service.jobs.load_configs", return_value=configs),
                 patch("service.jobs.dingtalk_table.mark_status"),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-                patch("service.jobs._task_delivery_input_dir", return_value=root / "raw"),
-                patch("service.jobs._ensure_dingtalk_input_attachment", return_value="shared-folder"),
+                patch(
+                    "service.jobs._download_uploaded_xlsx",
+                    return_value=root / "raw" / "外卖数据.xlsx",
+                ),
                 patch("service.jobs.prepare_product_menu", side_effect=prepare),
                 patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
                 patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/menu"),
                 patch("service.jobs.dingtalk_table.mark_links"),
                 patch(
-                    "service.jobs.dingtalk_table.clear_link_fields",
+                    "service.jobs.dingtalk_table.clear_attachment_fields",
                     side_effect=lambda *args: events.append("clear"),
                 ) as clear_fields,
                 patch("service.jobs.dingtalk_table.update_feedback") as update_feedback,
@@ -1239,8 +1443,10 @@ class DeliveryJobTests(unittest.TestCase):
                     "service.jobs.dingtalk_docs.folder_id_for_linked_node",
                     return_value="shared-folder",
                 ),
-                patch("service.jobs._task_delivery_input_dir", return_value=root / "raw"),
-                patch("service.jobs._task_annotation_path", return_value=annotation_path),
+                patch(
+                    "service.jobs._prepare_delivery_run_inputs",
+                    return_value=(root / "raw", annotation_path, []),
+                ),
                 patch(
                     "service.jobs.generate_delivery_tables",
                     side_effect=lambda *args: events.append("generate") or outputs,
@@ -1281,7 +1487,7 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertEqual(
             [call.args[2] for call in update_feedback.call_args_list],
             [
-                "1/3 正在下载外卖数据和产品清单",
+                "1/3 正在读取 AI 表上传的外卖数据和可选产品清单",
                 "2/3 正在生成外卖数表",
                 "3/3 正在上传外卖数表到钉钉文档",
                 "外卖数据统计完毕，京东无数据",
@@ -1328,8 +1534,10 @@ class DeliveryJobTests(unittest.TestCase):
                     return_value="shared-folder",
                 ),
                 patch("service.jobs.dingtalk_table.clear_link_fields"),
-                patch("service.jobs._task_delivery_input_dir", return_value=root / "raw"),
-                patch("service.jobs._task_annotation_path", return_value=annotation_path),
+                patch(
+                    "service.jobs._prepare_delivery_run_inputs",
+                    return_value=(root / "raw", annotation_path, []),
+                ),
                 patch("service.jobs.generate_delivery_tables", return_value=outputs),
                 patch(
                     "service.jobs._empty_delivery_platforms",
@@ -1383,7 +1591,10 @@ class DeliveryJobTests(unittest.TestCase):
                 return_value="shared-folder",
             ),
             patch("service.jobs.dingtalk_table.clear_link_fields") as clear_fields,
-            patch("service.jobs._task_delivery_input_dir", side_effect=RuntimeError("download failed")),
+            patch(
+                "service.jobs._prepare_delivery_run_inputs",
+                side_effect=RuntimeError("download failed"),
+            ),
             patch("service.jobs.dingtalk_table.mark_failed"),
             patch("service.jobs.dingtalk_table.mark_links") as mark_links,
             patch("service.jobs.dingtalk_docs.delete_existing_file") as delete_file,

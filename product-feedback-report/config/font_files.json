@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "description": "HTML 报告字体配置，默认复用周报内部字体文件。",
-  "fontDirectory": "../new-product-monitor/assets/fonts",
+  "description": "HTML 报告字体配置，使用本项目 assets 中的内部字体文件。",
+  "fontDirectory": "assets/fonts",
   "defaultFonts": {
     "cssFamily": "Microsoft YaHei, PingFang SC, Arial, sans-serif"
   },

@@ -529,7 +529,8 @@ html, body {{
   text-size-adjust: 100%;
 }}
 body {{
-  width: {page_width}px;
+  width: 100%;
+  min-width: {page_width}px;
   padding: 0;
   color: #{colors['black']};
   font-family: {font_family};
@@ -573,9 +574,14 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
 .image-cell {{ height: {details['imageHeightPx'] + 16}px; padding: 6px; }}
 .product-image {{ display: block; max-height: {details['imageHeightPx']}px; max-width: {details['imageMaxWidthPx']}px; margin: 0 auto; object-fit: contain; }}
 .strike {{ text-decoration: line-through; }}
-@media (hover: none), (pointer: coarse), (max-width: 767px) {{
-  html, body {{ width: 100%; min-width: 0; overflow-x: hidden; }}
-  .report-viewport {{ width: 100vw; margin: 0; overflow: hidden; touch-action: none; }}
+@media (min-width: 768px) {{
+  html, body {{ background: #f2f2f0; }}
+  .report-viewport {{ margin: 24px auto; background: #{colors['white']}; box-shadow: 0 2px 18px rgba(0, 0, 0, .08); }}
+}}
+@media (max-width: 767px) {{
+  html, body {{ width: 100%; min-width: 0; overflow-x: hidden; background: #{colors['white']}; }}
+  body {{ min-height: 100%; -webkit-overflow-scrolling: touch; }}
+  .report-viewport {{ width: 100vw; margin: 0; overflow: hidden; touch-action: pan-y pinch-zoom; }}
   .report-scale {{ margin: 0; will-change: transform; }}
   .report {{ margin: 0; }}
 }}
@@ -594,7 +600,7 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
   var pinchStartScale = 1;
 
   function isMobilePreview() {{
-    return window.matchMedia('(hover: none), (pointer: coarse), (max-width: 767px)').matches;
+    return window.matchMedia('(max-width: 767px)').matches;
   }}
 
   function clamp(value, min, max) {{

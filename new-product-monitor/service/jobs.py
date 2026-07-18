@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
@@ -86,25 +87,28 @@ def run_schedule_job(record_id: str) -> dict[str, Any]:
         schedule = dingtalk_table.fetch_schedule_row(configs, record_id)
         business = excel_report.parse_business(schedule.business, configs["report_rules"])
         stem = weekly_outputs.format_schedule_report_stem(schedule.business, schedule.year, schedule.week, schedule.end)
-        result = weekly_outputs.generate_weekly_outputs(
-            start=schedule.start,
-            end=schedule.end,
-            business=business,
-            output_mode="all",
-            stem=stem,
-            overwrite=True,
-            configs=configs,
-            progress_callback=progress_callback,
-        )
-        docs_config = dingtalk_docs.load_docs_config()
-        report_url = dingtalk_docs.upload_report_directory(
-            docs_config,
-            schedule.business,
-            schedule.year,
-            stem,
-            result.output_paths,
-            progress_callback=progress_callback,
-        )
+        with tempfile.TemporaryDirectory(prefix="weekly_report_http_") as temporary_output_dir:
+            result = weekly_outputs.generate_weekly_outputs(
+                start=schedule.start,
+                end=schedule.end,
+                business=business,
+                output_mode="all",
+                output_dir=temporary_output_dir,
+                stem=stem,
+                overwrite=True,
+                configs=configs,
+                progress_callback=progress_callback,
+            )
+            output_file_names = [path.name for path in result.output_paths]
+            docs_config = dingtalk_docs.load_docs_config()
+            report_url = dingtalk_docs.upload_report_directory(
+                docs_config,
+                schedule.business,
+                schedule.year,
+                stem,
+                result.output_paths,
+                progress_callback=progress_callback,
+            )
         status_name = "生成异常" if result.data_quality_warnings else "已生成"
         feedback = build_success_feedback(result)
         dingtalk_table.mark_success(configs, record_id, stem, report_url, feedback, status_name)
@@ -115,8 +119,8 @@ def run_schedule_job(record_id: str) -> dict[str, Any]:
             "startDate": schedule.start.isoformat(),
             "endDate": schedule.end.isoformat(),
             "stem": stem,
-            "reportDir": str(result.report_dir),
-            "outputFiles": [str(path) for path in result.output_paths],
+            "reportDir": None,
+            "outputFiles": output_file_names,
             "reportUrl": report_url,
             "recordCount": result.record_count,
             "status": status_name,

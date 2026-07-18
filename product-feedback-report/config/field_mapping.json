@@ -35,7 +35,7 @@
     "productMenu": {
       "label": "产品清单及上新日期",
       "fieldId": "YnLeVwN",
-      "cellType": "link",
+      "cellType": "attachment",
       "required": false
     },
     "meituanData": {

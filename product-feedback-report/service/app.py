@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 
 from service.jobs import (
+    run_finalize_report,
     run_generate_consumer_feedback_tables,
     run_generate_delivery_tables,
     run_generate_report,
@@ -107,3 +108,16 @@ async def generate_report(request: Request) -> AcceptedResponse:
     require_secret(secret)
     _submit(run_generate_report, record_id)
     return AcceptedResponse(ok=True, status="accepted", recordId=record_id, message="报告生成任务已接收。")
+
+
+@app.post("/finalize-report", response_model=AcceptedResponse)
+async def finalize_report(request: Request) -> AcceptedResponse:
+    record_id, secret = await parse_request(request)
+    require_secret(secret)
+    _submit(run_finalize_report, record_id)
+    return AcceptedResponse(
+        ok=True,
+        status="accepted",
+        recordId=record_id,
+        message="原始文件归档任务已接收。",
+    )

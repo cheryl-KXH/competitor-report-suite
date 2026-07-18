@@ -542,7 +542,7 @@ class SocialFeedbackJobTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         clear.assert_called_once()
-        self.assertEqual(upload_input.call_count, 2)
+        upload_input.assert_not_called()
         generate.assert_called_once()
         self.assertEqual(
             generate.call_args.args[1],
@@ -561,7 +561,7 @@ class SocialFeedbackJobTests(unittest.TestCase):
             [item.args[2] for item in feedback.call_args_list],
             [
                 "1/4 正在下载并识别社媒数据",
-                "2/4 正在归档社媒数据",
+                "2/4 正在准备社媒数据",
                 "3/4 正在生成社媒评论统计表",
                 "4/4 正在上传统计表到钉钉文档",
                 "已生成社媒评论统计表",
@@ -639,10 +639,7 @@ class SocialFeedbackJobTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(set(result["results"]), {"current", "peer"})
-            self.assertEqual(
-                [(item.args[1].record_id, item.args[2]) for item in upload_input.call_args_list],
-                [("current", "weibo"), ("peer", "weibo")],
-            )
+            upload_input.assert_not_called()
             self.assertEqual(
                 [item.kwargs["product"] for item in generate_tables.call_args_list],
                 ["糯青山柠檬奶", "雾红尘柠檬奶"],
@@ -656,7 +653,7 @@ class SocialFeedbackJobTests(unittest.TestCase):
                 progress_by_record.setdefault(item.args[1], []).append(item.args[2])
             expected_progress = [
                 "1/4 正在下载并识别社媒数据",
-                "2/4 正在按产品拆分并归档社媒数据",
+                "2/4 正在按产品拆分社媒数据",
                 "3/4 正在生成社媒评论统计表",
                 "4/4 正在上传统计表到钉钉文档",
                 "已生成社媒评论统计表",

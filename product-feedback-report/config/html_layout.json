@@ -10,7 +10,7 @@
     "background": "FFFFFF"
   },
   "logo": {
-    "path": "../new-product-monitor/assets/logo/report_logo.png",
+    "path": "assets/logo/report_logo.png",
     "heightPx": 72,
     "marginBottomPx": 8
   },

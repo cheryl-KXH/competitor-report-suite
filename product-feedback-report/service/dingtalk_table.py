@@ -11,12 +11,13 @@ from typing import Any
 
 ATTACHMENT_KEYS = {
     "deliveryData",
+    "productMenu",
     "weibo",
     "xiaohongshu",
     "douyin",
     "bilibili",
 }
-LINK_KEYS = {"productMenu", "meituanData", "elemeData", "jdData", "report"}
+LINK_KEYS = {"meituanData", "elemeData", "jdData", "report"}
 ATTACHMENT_CLEAR_ATTEMPTS = 5
 ATTACHMENT_CLEAR_DELAY_SECONDS = 0.5
 

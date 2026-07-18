@@ -339,20 +339,40 @@ def mcporter_selector(dingtalk_cfg: dict[str, Any], tool_name: str) -> list[str]
 
 def call_dingtalk_tool(dingtalk_cfg: dict[str, Any], tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     cmd = mcporter_selector(dingtalk_cfg, tool_name) + ["--args", json.dumps(payload, ensure_ascii=False)]
-    try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise SystemExit("找不到 mcporter，请先安装并配置钉钉 AI 表 MCP。") from exc
+    retryable_tools = {"query_records", "update_records"}
+    max_attempts = 3 if tool_name in retryable_tools else 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError("找不到 mcporter，请先安装并配置钉钉 AI 表 MCP。") from exc
 
-    if result.returncode != 0:
-        raise SystemExit(f"mcporter 调用失败：{result.stderr.strip() or result.stdout.strip()}")
-    try:
-        data = parse_mcporter_json(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"mcporter 返回不是 JSON：{result.stdout[:1000]}") from exc
-    if data.get("status") not in (None, "success", "ok"):
-        raise SystemExit(f"钉钉工具返回失败：{json.dumps(data.get('error', data), ensure_ascii=False)}")
-    return data
+        if result.returncode != 0:
+            raise RuntimeError(f"mcporter 调用失败：{result.stderr.strip() or result.stdout.strip()}")
+        try:
+            data = parse_mcporter_json(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"mcporter 返回不是 JSON：{result.stdout[:1000]}") from exc
+
+        failed = data.get("success") is False or data.get("status") not in (None, "success", "ok")
+        if not failed:
+            return data
+
+        code = str(data.get("code") or "").strip()
+        message = str(data.get("message") or data.get("error") or "未知错误").strip()
+        retryable = tool_name in retryable_tools and bool(data.get("retryable"))
+        if retryable and attempt < max_attempts:
+            operation = "只读查询" if tool_name == "query_records" else "幂等字段更新"
+            print(
+                f"WARNING: 钉钉{operation}失败，第 {attempt}/{max_attempts} 次，稍后重试：{code or message}",
+                file=sys.stderr,
+            )
+            time.sleep(float(attempt))
+            continue
+        detail = f"{code}: {message}" if code else message
+        raise RuntimeError(f"钉钉工具返回失败：{detail}")
+
+    raise RuntimeError("钉钉操作重试次数已用尽")
 
 
 def parse_mcporter_json(stdout: str) -> dict[str, Any]:

@@ -29,7 +29,7 @@ def _project_root(env_name: str, suite_name: str, sibling_name: str) -> Path:
 
 WEEKLY_ROOT = _project_root(
     "WEEKLY_REPORT_ROOT",
-    "competitor-new-product-monitor_new",
+    "new-product-monitor",
     "competitor-new-product-monitor_new",
 )
 FEEDBACK_ROOT = _project_root(

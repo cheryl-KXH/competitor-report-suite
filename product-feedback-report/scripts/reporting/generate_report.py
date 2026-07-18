@@ -15,8 +15,11 @@ if str(ROOT) not in sys.path:
 from service import dingtalk_table
 from service.config import load_configs, output_root
 from scripts.reporting.html import (
+    DeliveryReport,
+    JdSale,
     ProductInfo,
     ReportBuildResult,
+    SocialReport,
     build_report_html,
     normalize_product_key,
 )
@@ -180,13 +183,16 @@ def generate_report(
     products: list[str],
     *,
     report_date: date,
-    meituan_path: Path,
-    eleme_path: Path,
+    meituan_path: Path | None = None,
+    eleme_path: Path | None = None,
     jd_path: Path | None = None,
     social_paths: dict[str, Path] | None = None,
     launch_dates: dict[str, date | None] | None = None,
     output_dir: Path | None = None,
     configs: dict[str, dict[str, Any]] | None = None,
+    delivery_report: DeliveryReport | None = None,
+    jd_report: tuple[tuple[JdSale, ...], float] | None = None,
+    social_reports: dict[str, SocialReport] | None = None,
 ) -> ReportBuildResult:
     configs = configs or load_configs()
     launch_dates = launch_dates or {}
@@ -214,6 +220,9 @@ def generate_report(
         launch_dates=launch_dates,
         output_path=out_dir / filename,
         configs=configs,
+        delivery_report=delivery_report,
+        jd_report=jd_report,
+        social_report_models=social_reports,
     )
     return ReportBuildResult(result.path, tuple(dict.fromkeys([*product_warnings, *result.warnings])))
 
