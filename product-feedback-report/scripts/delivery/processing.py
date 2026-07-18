@@ -268,21 +268,44 @@ def _store_sale_days(row: RawSaleRow, lookup: dict[tuple[str, str, str], Annotat
     return min(difference + 1, SALES_WINDOW_DAYS)
 
 
+def _product_sale_days(
+    platform: str,
+    brand: str,
+    product: str,
+    crawl_date: date,
+    launch_date: date | None,
+) -> int:
+    if launch_date is None:
+        return SALES_WINDOW_DAYS
+    difference = (crawl_date - launch_date).days
+    if difference < 0:
+        raise RuntimeError(
+            "上架日期晚于抓取日期："
+            f"平台={platform}，品牌={brand}，产品={product}，"
+            f"上架日期={launch_date:%Y-%m-%d}，抓取日期={crawl_date:%Y-%m-%d}"
+        )
+    return min(difference + 1, SALES_WINDOW_DAYS)
+
+
 def _platform_delivery_metrics(
     raw_rows: list[RawSaleRow], annotations: list[AnnotationRow], platform_name: str
 ) -> list[dict[str, Any]]:
     lookup = _annotation_lookup(annotations)
     grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
-        lambda: {"sales": 0.0, "sale_days": 0, "stores": 0}
+        lambda: {"sales": 0.0, "sale_days": 0, "stores": 0, "crawl_date": None}
     )
     for row in _latest_store_product_rows(raw_rows, platform_name):
         data = grouped[(row.brand, row.product)]
         data["sales"] += row.monthly_sales
         data["sale_days"] += _store_sale_days(row, lookup)
         data["stores"] += 1
+        if data["crawl_date"] is None or row.crawl_date > data["crawl_date"]:
+            data["crawl_date"] = row.crawl_date
 
     metrics: list[dict[str, Any]] = []
     for (brand, product), data in grouped.items():
+        annotation = lookup.get((platform_name, brand, product))
+        launch_date = annotation.recent_launch_date if annotation else None
         metrics.append(
             {
                 "brand": brand,
@@ -290,11 +313,14 @@ def _platform_delivery_metrics(
                 "sales": data["sales"],
                 "sale_days": data["sale_days"],
                 "stores": data["stores"],
-                "launch_date": (
-                    lookup.get((platform_name, brand, product)).recent_launch_date
-                    if lookup.get((platform_name, brand, product))
-                    else None
+                "days_on_sale": _product_sale_days(
+                    platform_name,
+                    brand,
+                    product,
+                    data["crawl_date"],
+                    launch_date,
                 ),
+                "launch_date": launch_date,
                 "daily_store_avg": data["sales"] / data["sale_days"],
             }
         )
@@ -348,6 +374,7 @@ def generate_platform_delivery_summary(
             "总销量占比",
             "总在售天数",
             "在售门店数",
+            "在售天数",
             "上新日期",
         ]
     )
@@ -366,6 +393,7 @@ def generate_platform_delivery_summary(
                 item["sales"] / total_sales if total_sales else 0.0,
                 item["sale_days"],
                 item["stores"],
+                item["days_on_sale"],
                 item["launch_date"],
             ]
         )
@@ -380,17 +408,23 @@ def generate_platform_delivery_summary(
     for cell in ws["G"][1:]:
         cell.number_format = "#,##0"
     for cell in ws["H"][1:]:
+        cell.number_format = "#,##0"
+    for cell in ws["I"][1:]:
         cell.number_format = "yyyy-mm-dd"
     return save_workbook(wb, output_path)
 
 
 def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[AnnotationRow], output_path: Path) -> Path:
     lookup = _annotation_lookup(annotations)
-    grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(lambda: {"sales_sum": 0.0, "stores": 0})
+    grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {"sales_sum": 0.0, "stores": 0, "crawl_date": None}
+    )
     for row in _latest_store_product_rows(raw_rows, "京东"):
         data = grouped[(row.brand, row.product)]
         data["sales_sum"] += row.monthly_sales
         data["stores"] += 1
+        if data["crawl_date"] is None or row.crawl_date > data["crawl_date"]:
+            data["crawl_date"] = row.crawl_date
     metrics = [
         {
             "brand": brand,
@@ -398,6 +432,17 @@ def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[Annotation
             "sales_sum": data["sales_sum"],
             "stores": data["stores"],
             "sales": data["sales_sum"] / data["stores"],
+            "days_on_sale": _product_sale_days(
+                "京东",
+                brand,
+                product,
+                data["crawl_date"],
+                (
+                    lookup.get(("京东", brand, product)).recent_launch_date
+                    if lookup.get(("京东", brand, product))
+                    else None
+                ),
+            ),
             "launch_date": (
                 lookup.get(("京东", brand, product)).recent_launch_date
                 if lookup.get(("京东", brand, product))
@@ -411,7 +456,7 @@ def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[Annotation
     wb = Workbook()
     ws = wb.active
     ws.title = "京东外卖数据"
-    ws.append(["排名", "商品名称", "销量加总", "在售门店数", "总销量", "总销量占比", "上新日期"])
+    ws.append(["排名", "商品名称", "销量加总", "在售门店数", "总销量", "总销量占比", "在售天数", "上新日期"])
     previous_sales: float | None = None
     rank = 0
     for idx, item in enumerate(metrics, 1):
@@ -426,6 +471,7 @@ def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[Annotation
                 item["stores"],
                 round(item["sales"], 1),
                 item["sales"] / total_sales if total_sales else 0.0,
+                item["days_on_sale"],
                 item["launch_date"],
             ]
         )
@@ -438,6 +484,7 @@ def generate_jd_summary(raw_rows: list[RawSaleRow], annotations: list[Annotation
     for cell in ws["F"][1:]:
         cell.number_format = "0.00%"
     for cell in ws["G"][1:]:
+        cell.number_format = "#,##0"
+    for cell in ws["H"][1:]:
         cell.number_format = "yyyy-mm-dd"
     return save_workbook(wb, output_path)
-

@@ -35,21 +35,25 @@
     "productMenu": {
       "label": "产品清单及上新日期",
       "fieldId": "YnLeVwN",
+      "cellType": "link",
       "required": false
     },
     "meituanData": {
       "label": "美团",
       "fieldId": "tyzP9wf",
+      "cellType": "link",
       "required": false
     },
     "elemeData": {
       "label": "饿了么",
       "fieldId": "kHDjwB7",
+      "cellType": "link",
       "required": false
     },
     "jdData": {
       "label": "京东",
       "fieldId": "YKOJ1JO",
+      "cellType": "link",
       "required": false
     },
     "dianping": {
@@ -78,8 +82,9 @@
       "required": false
     },
     "report": {
-      "label": "跟踪报告",
-      "fieldId": "amWTton",
+      "label": "跟踪反馈报告",
+      "fieldId": "wAez0WM",
+      "cellType": "link",
       "required": false
     },
     "status": {

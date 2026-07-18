@@ -59,10 +59,10 @@ class DeliveryStatisticsTests(unittest.TestCase):
 
         self.assertEqual(
             values[0],
-            ("排名", "商品名称", "日店均销量", "总销量", "总销量占比", "总在售天数", "在售门店数", "上新日期"),
+            ("排名", "商品名称", "日店均销量", "总销量", "总销量占比", "总在售天数", "在售门店数", "在售天数", "上新日期"),
         )
-        self.assertEqual(values[1], (1, "产品A", 6.4286, 90, 0.5, 14, 2, datetime(2026, 7, 5)))
-        self.assertEqual(values[2], (1, "产品B", 1.5, 90, 0.5, 60, 2, None))
+        self.assertEqual(values[1], (1, "产品A", 6.4286, 90, 0.5, 14, 2, 8, datetime(2026, 7, 5)))
+        self.assertEqual(values[2], (1, "产品B", 1.5, 90, 0.5, 60, 2, 30, None))
 
     def test_sale_days_boundaries_and_exact_annotation_key(self) -> None:
         lookup = _annotation_lookup(
@@ -122,10 +122,10 @@ class DeliveryStatisticsTests(unittest.TestCase):
             values = list(ws.values)
             share_format = ws["F2"].number_format
 
-        self.assertEqual(values[0], ("排名", "商品名称", "销量加总", "在售门店数", "总销量", "总销量占比", "上新日期"))
-        self.assertEqual(values[1], (1, "产品A", 200, 2, 100, 0.5, datetime(2026, 7, 5)))
-        self.assertEqual(values[2], (1, "产品B", 100, 1, 100, 0.5, None))
-        self.assertEqual(values[3], (3, "产品C", 0, 1, 0, 0, None))
+        self.assertEqual(values[0], ("排名", "商品名称", "销量加总", "在售门店数", "总销量", "总销量占比", "在售天数", "上新日期"))
+        self.assertEqual(values[1], (1, "产品A", 200, 2, 100, 0.5, 6, datetime(2026, 7, 5)))
+        self.assertEqual(values[2], (1, "产品B", 100, 1, 100, 0.5, 30, None))
+        self.assertEqual(values[3], (3, "产品C", 0, 1, 0, 0, 30, None))
         self.assertEqual(share_format, "0.00%")
 
     def test_empty_platform_creates_header_only_workbook(self) -> None:
@@ -167,13 +167,22 @@ class DeliveryStatisticsTests(unittest.TestCase):
             annotation_wb.save(annotation_path)
 
             outputs = generate_delivery_tables("test-record", input_dir, annotation_path, output_dir)
+            output_names = {key: path.name for key, path in outputs.items()}
             mt_values = list(load_workbook(outputs["meituanData"], data_only=True).active.values)
             eleme_values = list(load_workbook(outputs["elemeData"], data_only=True).active.values)
             jd_values = list(load_workbook(outputs["jdData"], data_only=True).active.values)
 
-        self.assertEqual(mt_values[1], (1, "产品A", 16.6667, 100, 1, 6, 1, datetime(2026, 7, 5)))
-        self.assertEqual(eleme_values[1], (1, "产品A", 20, 60, 1, 3, 1, datetime(2026, 7, 8)))
-        self.assertEqual(jd_values[1], (1, "产品A", 80, 1, 80, 1, datetime(2026, 7, 5)))
+        self.assertEqual(
+            output_names,
+            {
+                "meituanData": "品牌A-20260710-美团.xlsx",
+                "elemeData": "品牌A-20260710-饿了么.xlsx",
+                "jdData": "品牌A-20260710-京东.xlsx",
+            },
+        )
+        self.assertEqual(mt_values[1], (1, "产品A", 16.6667, 100, 1, 6, 1, 6, datetime(2026, 7, 5)))
+        self.assertEqual(eleme_values[1], (1, "产品A", 20, 60, 1, 3, 1, 3, datetime(2026, 7, 8)))
+        self.assertEqual(jd_values[1], (1, "产品A", 80, 1, 80, 1, 6, datetime(2026, 7, 5)))
 
 
 if __name__ == "__main__":

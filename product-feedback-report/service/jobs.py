@@ -18,6 +18,11 @@ from scripts.delivery.generate_tables import generate_delivery_tables
 from scripts.delivery.prepare_product_menu import prepare_product_menu
 from scripts.reporting.generate_report import generate_report
 from scripts.social.generate_tables import generate_consumer_feedback_tables
+from scripts.social.processing import (
+    normalize_social_product_key,
+    social_workbook_products,
+    split_social_workbook,
+)
 
 
 CONSUMER_FEEDBACK_TABLE_ID = "hvcu7Bw"
@@ -31,6 +36,7 @@ SOCIAL_INPUT_PLATFORMS = (
     ("weibo", "微博"),
     ("xiaohongshu", "小红书"),
     ("douyin", "抖音"),
+    ("bilibili", "B站"),
 )
 SOCIAL_INPUT_FIELDS = tuple(key for key, _ in SOCIAL_INPUT_PLATFORMS)
 AI_TABLE_ATTACHMENT_URL_ATTEMPTS = 10
@@ -309,24 +315,57 @@ def _task_folder_name(record: dingtalk_table.TaskRecord) -> str:
     ]
     if not clean_brand or not clean_products:
         raise RuntimeError("“竞品品牌”或“关注新品”无法生成有效的钉钉文件夹名称。")
-    return f"{clean_brand}：{'、'.join(clean_products)}"
+    return f"{clean_brand}：{'、'.join(clean_products)} {_task_report_date(record):%Y%m%d}"
 
 
 def _ensure_local_upload_folder(
     configs: dict[str, dict[str, Any]], record: dingtalk_table.TaskRecord
 ) -> str:
     report_date = _task_report_date(record)
-    folder_id, _ = dingtalk_docs.ensure_local_upload_task_folder(
-        configs.get("dingtalk_docs", {}),
-        report_date.year,
-        report_date.month,
-        _task_folder_name(record),
+    docs_config = configs.get("dingtalk_docs", {})
+    brand = _clean_folder_text(_task_brand(record))
+    products = [
+        cleaned
+        for item in _task_products(record)
+        if (cleaned := _clean_folder_text(item))
+    ]
+    if not brand:
+        raise RuntimeError("“竞品品牌”为空，无法创建钉钉归档目录。")
+    if not products:
+        raise RuntimeError("“关注新品”为空，无法创建钉钉归档目录。")
+    date_suffix = report_date.strftime("%Y%m%d")
+    month_id, _ = dingtalk_docs.ensure_local_upload_month_folder(
+        docs_config, report_date.year, report_date.month
+    )
+    matches = [
+        (folder_id, name)
+        for folder_id, name in dingtalk_docs.child_folders(docs_config, month_id)
+        if brand in name
+        and all(product in name for product in products)
+        and name.endswith(f" {date_suffix}")
+    ]
+    if len(matches) == 1:
+        return matches[0][0]
+    if len(matches) > 1:
+        names = "、".join(name for _, name in matches)
+        raise RuntimeError(
+            f"同一月份存在多个同时包含品牌、产品名和报告日期的文件夹：{names}。"
+        )
+    folder_id, _ = dingtalk_docs.ensure_child_folder(
+        docs_config, month_id, _task_folder_name(record)
     )
     return folder_id
 
 
 def _clean_folder_text(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|\r\n]+', "_", value).strip()
+
+
+def _social_input_filename(brand: str, product: str, platform: str) -> str:
+    parts = [_clean_folder_text(value) for value in (brand, product, platform)]
+    if not all(parts):
+        raise RuntimeError("品牌、新品或社媒平台名无法生成有效文件名。")
+    return f"{'-'.join(parts)}.xlsx"
 
 
 def _same_social_day_products(
@@ -365,7 +404,7 @@ def _ensure_social_archive_folder(
     day30: date,
 ) -> str:
     """
-    社媒结果按 30 日所在月归档，并优先复用同品牌、同产品文件夹。
+    社媒结果按 30 日所在月归档，并优先复用同品牌、同产品、同 30 日文件夹。
     """
     brand = _clean_folder_text(_task_brand(record))
     products = [_clean_folder_text(item) for item in _task_products(record)]
@@ -379,12 +418,15 @@ def _ensure_social_archive_folder(
     month_id, _ = dingtalk_docs.ensure_local_upload_month_folder(
         docs_config, day30.year, day30.month
     )
+    date_suffix = day30.strftime("%Y%m%d")
     matches = [
         (folder_id, name)
         for folder_id, name in dingtalk_docs.child_folders(docs_config, month_id)
-        if brand in name and all(product in name for product in products)
+        if brand in name
+        and all(product in name for product in products)
+        and name.endswith(f" {date_suffix}")
     ]
-    exact_name = f"{brand}：{'、'.join(products)}"
+    exact_name = f"{brand}：{'、'.join(products)} {date_suffix}"
     exact_matches = [item for item in matches if item[1] == exact_name]
     if len(exact_matches) == 1:
         return exact_matches[0][0]
@@ -399,7 +441,7 @@ def _ensure_social_archive_folder(
     grouped_products = _same_social_day_products(configs, record, _task_brand(record), day30)
     if not grouped_products:
         raise RuntimeError("未找到同品牌、同一“30日”的新品记录。")
-    folder_name = f"{brand}：{'、'.join(grouped_products)}"
+    folder_name = f"{brand}：{'、'.join(grouped_products)} {date_suffix}"
     folder_id, _ = dingtalk_docs.ensure_child_folder(docs_config, month_id, folder_name)
     return folder_id
 
@@ -420,7 +462,22 @@ def _ensure_dingtalk_input_attachment(
         )
         if len(items) != 1 or node_count != 1:
             raise RuntimeError(f"“{field_label}”字段仅支持一个钉钉附件或文件夹链接。")
-        return folder_id or dingtalk_docs.folder_id_for_linked_node(configs.get("dingtalk_docs", {}), value)
+        docs_config = configs.get("dingtalk_docs", {})
+        source_folder = dingtalk_docs.folder_id_for_linked_node(docs_config, value)
+        target_folder = folder_id or source_folder
+        if not target_folder or source_folder == target_folder:
+            return target_folder
+        target_dir = output_root(configs) / record.record_id
+        if field_key == "deliveryData":
+            target_dir /= "raw_data"
+        local_path = dingtalk_docs.download_linked_file(
+            docs_config, value, target_dir
+        )
+        if not local_path or local_path.suffix.lower() != ".xlsx":
+            raise RuntimeError(f"“{field_label}”字段不是可下载的 xlsx 附件。")
+        url = dingtalk_docs.upload_file(docs_config, local_path, target_folder)
+        _update_input_file_reference(configs, record, field_key, local_path.name, url)
+        return target_folder
     ai_table_attachment = _single_ai_table_attachment(value, field_label)
     local_path = (
         _download_ai_table_attachment(
@@ -433,10 +490,30 @@ def _ensure_dingtalk_input_attachment(
         folder_id = _ensure_local_upload_folder(configs, record)
     local_path = _cache_promoted_input(configs, record, field_key, local_path)
     url = dingtalk_docs.upload_file(configs.get("dingtalk_docs", {}), local_path, folder_id)
-    dingtalk_table.update_attachment_fields(configs, record.record_id, {field_key: (local_path.name, url)})
-    linked_value = dingtalk_table.attachment_cell(local_path.name, url)
-    record.cells[field_key] = linked_value
+    _update_input_file_reference(configs, record, field_key, local_path.name, url)
     return folder_id
+
+
+def _update_input_file_reference(
+    configs: dict[str, dict[str, Any]],
+    record: dingtalk_table.TaskRecord,
+    field_key: str,
+    name: str,
+    url: str,
+) -> None:
+    cell_type = str(
+        dingtalk_table.field_defs(configs).get(field_key, {}).get("cellType") or ""
+    ).strip().lower()
+    if cell_type == "link" or (not cell_type and field_key in dingtalk_table.LINK_KEYS):
+        dingtalk_table.update_link_fields(
+            configs, record.record_id, {field_key: (name, url)}
+        )
+        record.cells[field_key] = dingtalk_table.link_cell(name, url)
+        return
+    dingtalk_table.update_attachment_fields(
+        configs, record.record_id, {field_key: (name, url)}
+    )
+    record.cells[field_key] = dingtalk_table.attachment_cell(name, url)
 
 
 def _cache_promoted_input(
@@ -481,7 +558,7 @@ def _consumer_feedback_configs(configs: dict[str, dict[str, Any]]) -> dict[str, 
             "xiaohongshu": {"fieldId": "NvvlACX"},
             "douyin": {"fieldId": "CtZivbf"},
             "bilibili": {"fieldId": "KfgxCcf"},
-            "report": {"fieldId": "amWTton"},
+            "report": {"fieldId": "amWTton", "cellType": "link"},
             "feedback": {"fieldId": "j8IgB7P"},
         }
     }
@@ -535,6 +612,7 @@ def _prepare_social_input(
     field_key: str,
     field_label: str,
     folder_id: str | None,
+    normalized_name: str | None = None,
 ) -> tuple[str | None, Path | None]:
     value = record.cells.get(field_key)
     if not _value_items(value):
@@ -550,9 +628,36 @@ def _prepare_social_input(
         resolved_folder = folder_id or dingtalk_docs.folder_id_for_linked_node(
             configs.get("dingtalk_docs", {}), value
         )
-        return resolved_folder, _download_linked_social_file(
+        local_path = _download_linked_social_file(
             configs, record, field_key, field_label
         )
+        current_name = _local_item_name(items[0])
+        source_folder = dingtalk_docs.folder_id_for_linked_node(
+            configs.get("dingtalk_docs", {}), value
+        )
+        needs_archive = bool(
+            resolved_folder
+            and (
+                source_folder != resolved_folder
+                or (normalized_name and current_name != normalized_name)
+            )
+        )
+        if not needs_archive:
+            return resolved_folder, local_path
+        if normalized_name and local_path.name != normalized_name:
+            normalized_path = local_path.with_name(normalized_name)
+            if normalized_path.exists():
+                normalized_path.unlink()
+            local_path.replace(normalized_path)
+            local_path = normalized_path
+        url = dingtalk_docs.upload_file(
+            configs.get("dingtalk_docs", {}), local_path, resolved_folder
+        )
+        dingtalk_table.update_attachment_fields(
+            configs, record.record_id, {field_key: (local_path.name, url)}
+        )
+        record.cells[field_key] = dingtalk_table.attachment_cell(local_path.name, url)
+        return resolved_folder, local_path
 
     attachment = _wait_for_ai_table_attachment_url(
         configs, record, field_key, field_label
@@ -564,6 +669,12 @@ def _prepare_social_input(
     local_path = _download_ai_table_attachment(
         configs, record, field_key, field_label, attachment
     )
+    if normalized_name and local_path.name != normalized_name:
+        normalized_path = local_path.with_name(normalized_name)
+        if normalized_path.exists():
+            normalized_path.unlink()
+        local_path.replace(normalized_path)
+        local_path = normalized_path
     if not folder_id:
         folder_id = _ensure_local_upload_folder(configs, record)
     url = dingtalk_docs.upload_file(
@@ -574,6 +685,110 @@ def _prepare_social_input(
     )
     record.cells[field_key] = dingtalk_table.attachment_cell(local_path.name, url)
     return folder_id, local_path
+
+
+def _download_social_input_source(
+    configs: dict[str, dict[str, Any]],
+    record: dingtalk_table.TaskRecord,
+    field_key: str,
+    field_label: str,
+) -> Path | None:
+    """Download a social input without archiving or changing AI Table cells."""
+    value = record.cells.get(field_key)
+    if not _value_items(value):
+        return None
+    if _has_dingtalk_node_link(value):
+        items = _value_items(value)
+        node_count = sum(
+            bool(dingtalk_docs.node_id_from_url(dingtalk_docs.extract_link(item)))
+            for item in items
+        )
+        if len(items) != 1 or node_count != 1:
+            raise RuntimeError(f"“{field_label}”字段仅支持一个钉钉 xlsx 附件。")
+        return _download_linked_social_file(
+            configs, record, field_key, field_label
+        )
+
+    attachment = _wait_for_ai_table_attachment_url(
+        configs, record, field_key, field_label
+    )
+    if attachment is None:
+        raise RuntimeError(
+            f"“{field_label}”字段只支持钉钉文档节点或 AI 表“+”上传的单个 xlsx 附件。"
+        )
+    return _download_ai_table_attachment(
+        configs, record, field_key, field_label, attachment
+    )
+
+
+def _single_social_record_product(
+    record: dingtalk_table.TaskRecord,
+) -> tuple[str, str]:
+    products = _task_products(record)
+    if len(products) != 1:
+        raise RuntimeError(
+            f"同品牌同一“30日”的记录 {record.record_id} 必须且只能填写一款新品。"
+        )
+    product = products[0]
+    key = normalize_social_product_key(product)
+    if not key:
+        raise RuntimeError(f"记录 {record.record_id} 的“新品”无法识别。")
+    return key, product
+
+
+def _same_social_day_record_index(
+    configs: dict[str, dict[str, Any]],
+    current_record: dingtalk_table.TaskRecord,
+    brand: str,
+    day30: date,
+) -> dict[str, tuple[str, dingtalk_table.TaskRecord]]:
+    candidates = [current_record]
+    candidates.extend(
+        record
+        for record in dingtalk_table.fetch_records(configs)
+        if record.record_id != current_record.record_id
+    )
+    index: dict[str, tuple[str, dingtalk_table.TaskRecord]] = {}
+    for record in candidates:
+        if _task_brand(record) != brand:
+            continue
+        try:
+            record_day30 = _social_task_date(record, "day30", "30日")
+        except RuntimeError:
+            continue
+        if record_day30 != day30:
+            continue
+        product_key, product = _single_social_record_product(record)
+        if product_key in index:
+            previous = index[product_key][1]
+            raise RuntimeError(
+                f"产品“{product}”在同品牌同一“30日”匹配到多条记录："
+                f"{previous.record_id}、{record.record_id}。"
+            )
+        index[product_key] = (product, record)
+    current_key, current_product = _single_social_record_product(current_record)
+    if current_key not in index:
+        raise RuntimeError(
+            f"当前产品“{current_product}”未匹配到同品牌同一“30日”的记录。"
+        )
+    return index
+
+
+def _upload_social_input(
+    configs: dict[str, dict[str, Any]],
+    record: dingtalk_table.TaskRecord,
+    field_key: str,
+    path: Path,
+    folder_id: str,
+) -> str:
+    url = dingtalk_docs.upload_file(
+        configs.get("dingtalk_docs", {}), path, folder_id
+    )
+    dingtalk_table.update_attachment_fields(
+        configs, record.record_id, {field_key: (path.name, url)}
+    )
+    record.cells[field_key] = dingtalk_table.attachment_cell(path.name, url)
+    return url
 
 
 def _existing_field_ids(configs: dict[str, dict[str, Any]]) -> set[str]:
@@ -621,8 +836,8 @@ def _empty_delivery_platforms(outputs: dict[str, Path]) -> list[str]:
 
 def _delivery_completion_message(empty_platforms: list[str]) -> str:
     if not empty_platforms:
-        return "已生成外卖数表"
-    return f"已生成外卖数表，{'、'.join(empty_platforms)}无数据"
+        return "外卖数据统计完毕"
+    return f"外卖数据统计完毕，{'、'.join(empty_platforms)}无数据"
 
 
 def run_prepare_product_menu(record_id: str) -> dict[str, Any]:
@@ -631,9 +846,9 @@ def run_prepare_product_menu(record_id: str) -> dict[str, Any]:
     try:
         dingtalk_table.mark_status(configs, record_id, _status(configs, "productMenuRunning", "产品清单生成中"))
         record = dingtalk_table.fetch_record(configs, record_id)
-        folder_id = _task_docs_folder_id(configs, record)
-        dingtalk_table.clear_attachment_fields(configs, record_id, ("productMenu",))
-        record.cells["productMenu"] = []
+        folder_id = _ensure_local_upload_folder(configs, record)
+        dingtalk_table.clear_link_fields(configs, record_id, ("productMenu",))
+        record.cells["productMenu"] = ""
         progress_callback("1/4 正在读取外卖数据")
         folder_id = _ensure_dingtalk_input_attachment(configs, record, "deliveryData", "外卖数据", folder_id)
         input_dir = _task_delivery_input_dir(configs, record)
@@ -646,7 +861,7 @@ def run_prepare_product_menu(record_id: str) -> dict[str, Any]:
             {"productMenu": (output.name, url)},
             _status(configs, "waitingAnnotation", "待标注"),
         )
-        progress_callback("已生成，请人工检查产品清单上新日期标注是否完整。")
+        progress_callback("已提取产品清单，请确认在售不满30日的新品上新日期标注无遗漏后，再进行外卖数据统计")
         return {"ok": True, "stage": "prepare-product-menu", "recordId": record_id, "output": str(output), "url": url}
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
@@ -664,10 +879,10 @@ def run_generate_delivery_tables(record_id: str) -> dict[str, Any]:
     try:
         dingtalk_table.mark_status(configs, record_id, _status(configs, "dataTablesRunning", "外卖数据统计中"))
         record = dingtalk_table.fetch_record(configs, record_id)
-        folder_id = _task_docs_folder_id(configs, record)
-        dingtalk_table.clear_attachment_fields(configs, record_id, DELIVERY_OUTPUT_FIELDS)
+        folder_id = _ensure_local_upload_folder(configs, record)
+        dingtalk_table.clear_link_fields(configs, record_id, DELIVERY_OUTPUT_FIELDS)
         for key in DELIVERY_OUTPUT_FIELDS:
-            record.cells[key] = []
+            record.cells[key] = ""
         progress_callback("1/3 正在下载外卖数据和产品清单")
         folder_id = _ensure_dingtalk_input_attachment(configs, record, "deliveryData", "外卖数据", folder_id)
         folder_id = _ensure_dingtalk_input_attachment(configs, record, "productMenu", "产品清单", folder_id)
@@ -721,80 +936,323 @@ def run_generate_delivery_tables(record_id: str) -> dict[str, Any]:
 def run_generate_consumer_feedback_tables(record_id: str) -> dict[str, Any]:
     configs = _consumer_feedback_configs(load_configs())
     progress_callback = build_progress_callback(configs, record_id)
+    generation_failures_reported = False
     try:
         record = dingtalk_table.fetch_record(configs, record_id)
         brand = _task_brand(record)
-        products = _task_products(record)
         if not brand:
             raise RuntimeError("“品牌”为空，无法生成社媒评论统计表。")
-        if not products:
-            raise RuntimeError("“新品”为空，无法生成社媒评论统计表。")
-        product = "、".join(products)
+        current_key, current_product = _single_social_record_product(record)
         launch_date = _social_task_date(record, "launchDate", "上市日期")
         day30 = _social_task_date(record, "day30", "30日")
         if day30 < launch_date:
             raise RuntimeError("“30日”早于“上市日期”，无法生成社媒评论统计表。")
 
-        dingtalk_table.clear_link_fields(configs, record_id, ("report",))
-        record.cells["report"] = ""
-        progress_callback("1/3 正在下载并归档社媒数据")
+        progress_callback("1/4 正在下载并识别社媒数据")
         folder_id = _ensure_social_archive_folder(configs, record, day30)
-        platform_files: dict[str, Path] = {}
+
+        source_files: dict[str, tuple[str, Path, dict[str, str]]] = {}
         for key, label in SOCIAL_INPUT_PLATFORMS:
-            folder_id, path = _prepare_social_input(
-                configs, record, key, label, folder_id
-            )
+            path = _download_social_input_source(configs, record, key, label)
             if path:
-                platform_files[key] = path
-        progress_callback("2/3 正在生成社媒评论统计表")
-        output = generate_consumer_feedback_tables(
-            record_id,
-            platform_files,
-            brand=brand,
-            product=product,
-            start_date=f"{launch_date.month}.{launch_date.day}",
-            end_date=f"{day30.month}.{day30.day}",
+                source_files[key] = (label, path, social_workbook_products(path))
+
+        needs_group_match = any(
+            set(products) != {current_key}
+            for _, _, products in source_files.values()
         )
-        progress_callback("3/3 正在上传统计表到钉钉文档")
-        url = dingtalk_docs.upload_file(
-            configs.get("dingtalk_docs", {}), output, folder_id
+        record_index = (
+            _same_social_day_record_index(configs, record, brand, day30)
+            if needs_group_match
+            else {current_key: (current_product, record)}
         )
-        dingtalk_table.mark_links(
-            configs, record_id, {"report": (output.name, url)}
+        product_names = {
+            product_key: product_name
+            for product_key, (product_name, _) in record_index.items()
+        }
+
+        for field_label, _, source_products in source_files.values():
+            if current_key not in source_products:
+                labels = "、".join(source_products.values())
+                raise RuntimeError(
+                    f"“{field_label}”文件不包含当前产品“{current_product}”，"
+                    f"文件中识别到：{labels}。"
+                )
+            unknown = [
+                source_products[key]
+                for key in source_products
+                if key not in record_index
+            ]
+            if unknown:
+                raise RuntimeError(
+                    f"“{field_label}”文件包含无法匹配到同品牌同一“30日”记录的产品："
+                    f"{'、'.join(unknown)}。"
+                )
+
+        affected_product_keys = {current_key}
+        for _, _, source_products in source_files.values():
+            affected_product_keys.update(source_products)
+        affected_record_ids = {
+            record_index[product_key][1].record_id
+            for product_key in affected_product_keys
+        }
+        records_by_id = {
+            matched_record.record_id: matched_record
+            for _, matched_record in record_index.values()
+        }
+        ordered_record_ids = [record_id] + sorted(affected_record_ids - {record_id})
+        second_step = (
+            "2/4 正在按产品拆分并归档社媒数据"
+            if needs_group_match
+            else "2/4 正在归档社媒数据"
         )
-        progress_callback("已生成社媒评论统计表")
+        for target_record_id in ordered_record_ids:
+            target_progress = build_progress_callback(configs, target_record_id)
+            if target_record_id != record_id:
+                target_progress("1/4 正在下载并识别社媒数据")
+            target_progress(second_step)
+
+        planned_files: dict[str, dict[str, Path]] = {record_id: {}}
+        for field_key, (field_label, source_path, source_products) in source_files.items():
+            output_names = {
+                product_key: _social_input_filename(
+                    brand, product_names[product_key], field_label
+                )
+                for product_key in source_products
+            }
+            split_outputs = split_social_workbook(
+                source_path,
+                product_names=product_names,
+                output_dir=(
+                    output_root(configs)
+                    / record_id
+                    / "social_splits"
+                    / field_key
+                ),
+                output_names=output_names,
+            )
+            for product_key, split_path in split_outputs.items():
+                target_record = record_index[product_key][1]
+                planned_files.setdefault(target_record.record_id, {})[
+                    field_key
+                ] = split_path
+
+        for target_record_id, field_paths in planned_files.items():
+            target_record = records_by_id[target_record_id]
+            for field_key, path in field_paths.items():
+                _upload_social_input(
+                    configs, target_record, field_key, path, folder_id
+                )
+
+        results: dict[str, dict[str, str]] = {}
+        failures: list[str] = []
+        platform_labels = dict(SOCIAL_INPUT_PLATFORMS)
+        for target_record_id in ordered_record_ids:
+            target_record = records_by_id[target_record_id]
+            _, target_product = _single_social_record_product(target_record)
+            target_progress = build_progress_callback(configs, target_record_id)
+            try:
+                target_launch_date = _social_task_date(
+                    target_record, "launchDate", "上市日期"
+                )
+                target_day30 = _social_task_date(target_record, "day30", "30日")
+                if target_day30 != day30:
+                    raise RuntimeError("关联记录的“30日”与当前记录不一致。")
+                if target_day30 < target_launch_date:
+                    raise RuntimeError("“30日”早于“上市日期”，无法生成社媒评论统计表。")
+
+                platform_files = dict(planned_files.get(target_record_id, {}))
+                for field_key, field_label in SOCIAL_INPUT_PLATFORMS:
+                    if field_key in platform_files:
+                        continue
+                    _, path = _prepare_social_input(
+                        configs,
+                        target_record,
+                        field_key,
+                        field_label,
+                        folder_id,
+                        _social_input_filename(
+                            brand, target_product, platform_labels[field_key]
+                        ),
+                    )
+                    if path:
+                        platform_files[field_key] = path
+
+                dingtalk_table.clear_link_fields(
+                    configs, target_record_id, ("report",)
+                )
+                target_record.cells["report"] = ""
+                target_progress("3/4 正在生成社媒评论统计表")
+                output = generate_consumer_feedback_tables(
+                    target_record_id,
+                    platform_files,
+                    brand=brand,
+                    product=target_product,
+                    start_date=f"{target_launch_date.month}.{target_launch_date.day}",
+                    end_date=f"{target_day30.month}.{target_day30.day}",
+                )
+                target_progress("4/4 正在上传统计表到钉钉文档")
+                url = dingtalk_docs.upload_file(
+                    configs.get("dingtalk_docs", {}), output, folder_id
+                )
+                dingtalk_table.mark_links(
+                    configs, target_record_id, {"report": (output.name, url)}
+                )
+                target_progress("已生成社媒评论统计表")
+                results[target_record_id] = {
+                    "product": target_product,
+                    "output": str(output),
+                    "url": url,
+                }
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                failures.append(f"{target_product}：{message}")
+                try:
+                    target_progress(f"生成失败：{message}")
+                    dingtalk_table.mark_failed(configs, target_record_id, message)
+                except Exception:
+                    failures[-1] += "；回写失败状态也失败"
+
+        if failures:
+            generation_failures_reported = True
+            raise RuntimeError("；".join(failures))
+
+        current_result = results[record_id]
         return {
             "ok": True,
             "stage": "generate-consumer-feedback-tables",
             "recordId": record_id,
-            "output": str(output),
-            "url": url,
+            "output": current_result["output"],
+            "url": current_result["url"],
+            "results": results,
         }
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
-        try:
-            progress_callback(f"生成失败：{message}")
-            dingtalk_table.mark_failed(configs, record_id, message)
-        except Exception:
-            message += "\n\n回写失败状态也失败：\n" + traceback.format_exc()
+        if not generation_failures_reported:
+            try:
+                progress_callback(f"生成失败：{message}")
+                dingtalk_table.mark_failed(configs, record_id, message)
+            except Exception:
+                message += "\n\n回写失败状态也失败：\n" + traceback.format_exc()
         raise RuntimeError(message) from exc
 
 
 def run_generate_report(record_id: str) -> dict[str, Any]:
     configs = load_configs()
+    progress_callback = build_progress_callback(configs, record_id)
+    current_stage = "读取当前行信息"
     try:
         dingtalk_table.mark_status(configs, record_id, _status(configs, "reportRunning", "报告生成中"))
+        progress_callback("1/4 正在读取当前行的品牌、报告日期和关注新品")
         record = dingtalk_table.fetch_record(configs, record_id)
-        brand = _task_brand(record) or "品牌"
-        products = _task_products(record)
-        output = generate_report(record_id, brand, products)
-        url = dingtalk_docs.upload_file(configs.get("dingtalk_docs", {}), output, _task_docs_folder_id(configs, record))
-        dingtalk_table.mark_links(configs, record_id, {"report": (output.name, url)}, _status(configs, "done", "已生成"))
-        return {"ok": True, "stage": "generate-report", "recordId": record_id, "output": str(output), "url": url}
+        brand = _task_brand(record)
+        if not brand:
+            raise RuntimeError("“竞品品牌”为空，无法生成报告。")
+        report_date = _task_report_date(record)
+        grouped_products = _task_products(record)
+        if not grouped_products:
+            raise RuntimeError("“关注新品”为空，无法生成报告。")
+
+        social_configs = _consumer_feedback_configs(configs)
+        requested_products = {
+            normalize_social_product_key(product): product
+            for product in grouped_products
+        }
+        launch_dates: dict[str, date | None] = {}
+        social_values: dict[str, Any] = {}
+        for social_record in dingtalk_table.fetch_records(social_configs):
+            if _task_brand(social_record) != brand:
+                continue
+            try:
+                day30 = _social_task_date(social_record, "day30", "30日")
+            except RuntimeError:
+                continue
+            if day30 != report_date:
+                continue
+            launch_date = _social_task_date(social_record, "launchDate", "上市日期")
+            for social_product in _task_products(social_record):
+                product = requested_products.get(
+                    normalize_social_product_key(social_product)
+                )
+                if not product:
+                    continue
+                launch_dates[product] = launch_date
+                if social_record.cells.get("report"):
+                    social_values[product] = social_record.cells["report"]
+
+        folder_id = _ensure_local_upload_folder(configs, record)
+        source_dir = output_root(configs) / record_id / "report_sources"
+        source_dir.mkdir(parents=True, exist_ok=True)
+
+        current_stage = "下载资料"
+        progress_callback("2/4 正在下载外卖数表和关注新品的社媒评论统计表")
+        platform_paths: dict[str, Path | None] = {}
+        for key, label in DELIVERY_OUTPUT_PLATFORMS:
+            value = record.cells.get(key)
+            if not value:
+                platform_paths[key] = None
+                continue
+            platform_paths[key] = dingtalk_docs.download_linked_file(
+                configs.get("dingtalk_docs", {}), value, source_dir / key
+            )
+        if not platform_paths.get("meituanData"):
+            raise RuntimeError("美团外卖数表缺失，请先完成外卖数据统计。")
+        if not platform_paths.get("elemeData"):
+            raise RuntimeError("饿了么外卖数表缺失，请先完成外卖数据统计。")
+
+        social_paths: dict[str, Path] = {}
+        for product, value in social_values.items():
+            downloaded = dingtalk_docs.download_linked_file(
+                configs.get("dingtalk_docs", {}),
+                value,
+                source_dir / "social" / _clean_folder_text(product),
+            )
+            if downloaded:
+                social_paths[product] = downloaded
+
+        current_stage = "生成报告"
+        progress_callback("3/4 正在查找关注新品的产品信息并生成跟踪报告")
+        result = generate_report(
+            record_id,
+            brand,
+            grouped_products,
+            report_date=report_date,
+            meituan_path=platform_paths["meituanData"],
+            eleme_path=platform_paths["elemeData"],
+            jd_path=platform_paths.get("jdData"),
+            social_paths=social_paths,
+            launch_dates=launch_dates,
+            configs=configs,
+        )
+        current_stage = "上传报告"
+        progress_callback("4/4 正在上传跟踪报告到钉钉文档")
+        url = dingtalk_docs.upload_file(
+            configs.get("dingtalk_docs", {}), result.path, folder_id
+        )
+        dingtalk_table.mark_links(
+            configs,
+            record_id,
+            {"report": (result.path.name, url)},
+            _status(configs, "done", "已生成"),
+        )
+        feedback = "报告已生成"
+        if result.warnings:
+            feedback += "；部分资料暂无法获取：" + "；".join(result.warnings)
+        progress_callback(feedback)
+        return {
+            "ok": True,
+            "stage": "generate-report",
+            "recordId": record_id,
+            "output": str(result.path),
+            "url": url,
+            "warnings": list(result.warnings),
+        }
     except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        feedback = f"报告生成失败（{current_stage}）：{detail}"
         message = f"{type(exc).__name__}: {exc}"
         try:
-            dingtalk_table.mark_failed(configs, record_id, message)
+            dingtalk_table.mark_failed(configs, record_id, feedback)
         except Exception:
             message += "\n\n回写失败状态也失败：\n" + traceback.format_exc()
         raise RuntimeError(message) from exc

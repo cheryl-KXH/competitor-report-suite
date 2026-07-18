@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "description": "参考原 PDF 的 HTML 跟踪反馈报告排版配置。",
+  "page": {
+    "widthPx": 794,
+    "paddingTopPx": 34,
+    "paddingRightPx": 44,
+    "paddingBottomPx": 52,
+    "paddingLeftPx": 44,
+    "background": "FFFFFF"
+  },
+  "logo": {
+    "path": "../new-product-monitor/assets/logo/report_logo.png",
+    "heightPx": 72,
+    "marginBottomPx": 8
+  },
+  "fonts": {
+    "chineseFontFileKey": "chineseFont",
+    "latinFontFileKey": "latinFont",
+    "defaultSizePx": 12,
+    "titleSizePx": 21,
+    "sectionSizePx": 16,
+    "productTitleSizePx": 17,
+    "smallSizePx": 10,
+    "fallbackFamily": "Microsoft YaHei, PingFang SC, Arial, sans-serif"
+  },
+  "colors": {
+    "white": "FFFFFF",
+    "black": "000000",
+    "headerFill": "D9D9D9",
+    "labelFill": "E7EFFA",
+    "trackedFill": "FCE4D6",
+    "muted": "666666"
+  },
+  "tables": {
+    "borderWidthPx": 1,
+    "cellPaddingVerticalPx": 5,
+    "cellPaddingHorizontalPx": 6
+  },
+  "productImage": {
+    "maxWidthPx": 300,
+    "maxHeightPx": 220
+  }
+}

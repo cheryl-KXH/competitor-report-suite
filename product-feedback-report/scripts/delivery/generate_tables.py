@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from service.config import load_configs, output_root
 from scripts.delivery.processing import find_delivery_rows, generate_jd_summary, generate_platform_delivery_summary, read_annotation
+from scripts.delivery.prepare_product_menu import _crawl_date, _primary_brand, _safe_filename
 
 
 def generate_delivery_tables(record_id: str, input_dir: Path, annotation_path: Path, output_dir: Path | None = None) -> dict[str, Path]:
@@ -21,10 +22,13 @@ def generate_delivery_tables(record_id: str, input_dir: Path, annotation_path: P
     if not raw_rows:
         raise RuntimeError(f"未在目录中找到外卖原始数据：{input_dir}")
     annotations = read_annotation(annotation_path)
+    filename_prefix = _safe_filename(
+        f"{_primary_brand(raw_rows)}-{_crawl_date(raw_rows):%Y%m%d}"
+    )
     return {
-        "meituanData": generate_platform_delivery_summary(raw_rows, annotations, "美团", out_dir / "美团外卖数据.xlsx"),
-        "elemeData": generate_platform_delivery_summary(raw_rows, annotations, "饿了么", out_dir / "饿了么外卖数据.xlsx"),
-        "jdData": generate_jd_summary(raw_rows, annotations, out_dir / "京东外卖数据.xlsx"),
+        "meituanData": generate_platform_delivery_summary(raw_rows, annotations, "美团", out_dir / f"{filename_prefix}-美团.xlsx"),
+        "elemeData": generate_platform_delivery_summary(raw_rows, annotations, "饿了么", out_dir / f"{filename_prefix}-饿了么.xlsx"),
+        "jdData": generate_jd_summary(raw_rows, annotations, out_dir / f"{filename_prefix}-京东.xlsx"),
     }
 
 

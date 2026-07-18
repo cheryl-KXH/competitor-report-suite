@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import unicodedata
 from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
@@ -15,6 +16,7 @@ SOCIAL_PLATFORMS = (
     ("weibo", "微博"),
     ("xiaohongshu", "小红书"),
     ("douyin", "抖音"),
+    ("bilibili", "B站"),
 )
 
 
@@ -33,9 +35,94 @@ def _text(value: Any) -> str:
 
 
 def _header_index(header: list[Any], name: str) -> int | None:
-    normalized = [_text(value).replace(" ", "") for value in header]
-    target = name.replace(" ", "")
+    normalize = lambda value: re.sub(
+        r"\s+", "", unicodedata.normalize("NFKC", _text(value))
+    )
+    normalized = [normalize(value) for value in header]
+    target = normalize(name)
     return next((index for index, value in enumerate(normalized) if value == target), None)
+
+
+def normalize_social_product_key(value: Any) -> str:
+    """Normalize product labels without allowing fuzzy/substring matching."""
+    text = unicodedata.normalize("NFKC", _text(value)).casefold()
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", text)
+
+
+def social_workbook_products(path: Path) -> dict[str, str]:
+    """Return normalized product keys and their first source labels."""
+    workbook = load_workbook(path, read_only=True, data_only=False)
+    try:
+        worksheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
+        header = [cell.value for cell in worksheet[1]]
+        product_index = _header_index(header, "产品名称")
+        if product_index is None:
+            raise RuntimeError(f"社媒文件缺少“产品名称”列：{path.name}")
+
+        products: dict[str, str] = {}
+        for row_number, row in enumerate(
+            worksheet.iter_rows(min_row=2, values_only=True), start=2
+        ):
+            if not any(_text(value) for value in row):
+                continue
+            raw_product = row[product_index] if product_index < len(row) else None
+            label = _text(raw_product)
+            key = normalize_social_product_key(label)
+            if not key:
+                raise RuntimeError(
+                    f"社媒文件第 {row_number} 行“产品名称”为空：{path.name}"
+                )
+            products.setdefault(key, label)
+        if not products:
+            raise RuntimeError(f"社媒文件没有可处理的数据行：{path.name}")
+        return products
+    finally:
+        workbook.close()
+
+
+def split_social_workbook(
+    path: Path,
+    *,
+    product_names: dict[str, str],
+    output_dir: Path,
+    output_names: dict[str, str],
+) -> dict[str, Path]:
+    """Create one formatting-preserving workbook per product in the source file."""
+    source_products = social_workbook_products(path)
+    unknown = [source_products[key] for key in source_products if key not in product_names]
+    if unknown:
+        raise RuntimeError(
+            f"社媒文件包含无法匹配到同品牌同一“30日”记录的产品：{'、'.join(unknown)}"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: dict[str, Path] = {}
+    for product_key in source_products:
+        workbook = load_workbook(path, data_only=False)
+        try:
+            worksheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
+            header = [cell.value for cell in worksheet[1]]
+            product_index = _header_index(header, "产品名称")
+            if product_index is None:
+                raise RuntimeError(f"社媒文件缺少“产品名称”列：{path.name}")
+            for row_number in range(worksheet.max_row, 1, -1):
+                row_values = [cell.value for cell in worksheet[row_number]]
+                if not any(_text(value) for value in row_values):
+                    worksheet.delete_rows(row_number)
+                    continue
+                raw_product = (
+                    row_values[product_index]
+                    if product_index < len(row_values)
+                    else None
+                )
+                if normalize_social_product_key(raw_product) != product_key:
+                    worksheet.delete_rows(row_number)
+            output_path = output_dir / output_names[product_key]
+            workbook.save(output_path)
+            outputs[product_key] = output_path
+        finally:
+            workbook.close()
+    return outputs
 
 
 def summarize_social_rows(key: str, label: str, rows: Iterable[Iterable[Any]]) -> PlatformSummary:
@@ -166,7 +253,7 @@ def build_social_feedback_workbook(
     for cell in worksheet["A1:D1"][0]:
         cell.font = Font(name="微软雅黑", size=13, bold=True)
     for cell in worksheet["E"][:4]:
-        cell.font = Font(name="微软雅黑", size=11, color="1F4E79")
+        cell.font = Font(name="微软雅黑", size=11, color="000000")
 
     current_row = 2
     for summary in summaries:
@@ -178,16 +265,17 @@ def build_social_feedback_workbook(
         _apply_table_style(worksheet, f"A{header_row}:D{header_row}", fill=header_fill, bold=True)
         current_row += 1
 
-        detail_count = max(len(summary.positive_tags), len(summary.negative_tags), 1)
+        detail_count = max(len(summary.positive_tags), len(summary.negative_tags))
         for index in range(detail_count):
             positive = summary.positive_tags[index] if index < len(summary.positive_tags) else None
             negative = summary.negative_tags[index] if index < len(summary.negative_tags) else None
-            worksheet.cell(current_row, 1, positive[0] if positive else "/" if index == 0 and not summary.positive_tags else "")
-            worksheet.cell(current_row, 2, positive[1] if positive else 0 if index == 0 and not summary.positive_tags else "")
-            worksheet.cell(current_row, 3, negative[0] if negative else "/" if index == 0 and not summary.negative_tags else "")
-            worksheet.cell(current_row, 4, negative[1] if negative else 0 if index == 0 and not summary.negative_tags else "")
+            worksheet.cell(current_row, 1, positive[0] if positive else "")
+            worksheet.cell(current_row, 2, positive[1] if positive else "")
+            worksheet.cell(current_row, 3, negative[0] if negative else "")
+            worksheet.cell(current_row, 4, negative[1] if negative else "")
             current_row += 1
-        _apply_table_style(worksheet, f"A{header_row + 1}:D{current_row - 1}")
+        if detail_count:
+            _apply_table_style(worksheet, f"A{header_row + 1}:D{current_row - 1}")
 
         worksheet.cell(current_row, 1, "好评用户数")
         worksheet.cell(current_row, 2, summary.positive_users)

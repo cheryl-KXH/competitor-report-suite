@@ -22,8 +22,10 @@ from service.jobs import (
     _task_docs_folder_id,
     _task_folder_name,
     run_generate_delivery_tables,
+    run_generate_report,
     run_prepare_product_menu,
 )
+from scripts.reporting.html import ReportBuildResult
 
 
 class DeliveryJobTests(unittest.TestCase):
@@ -42,14 +44,276 @@ class DeliveryJobTests(unittest.TestCase):
             ws.append([1, product, sales])
         wb.save(path)
 
-    def test_all_platform_results_use_attachment_cell_format(self) -> None:
+    def test_report_job_uses_only_current_row_products_and_writes_existing_report_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "霸王茶姬：糯青山柠檬奶、雾红尘柠檬奶 20260718.html"
+            output.write_text("<html></html>", encoding="utf-8")
+            mt = root / "美团.xlsx"
+            elm = root / "饿了么.xlsx"
+            social = root / "雾红尘.xlsx"
+            unrelated_social = root / "不应进入.xlsx"
+            for path in (mt, elm, social, unrelated_social):
+                path.write_bytes(b"xlsx")
+            configs = {
+                "dingtalk": {},
+                "dingtalk_docs": {},
+                "field_mapping": {"fields": {}},
+                "report_rules": {"outputDirectory": str(root / "outputs")},
+            }
+            main_record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": ["糯青山柠檬奶", "雾红尘柠檬奶"],
+                    "launchDate": "2026-07-18",
+                    "meituanData": {"name": "美团.xlsx", "link": "mt"},
+                    "elemeData": {"name": "饿了么.xlsx", "link": "elm"},
+                },
+            )
+            social_record = dingtalk_table.TaskRecord(
+                "social",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": ["雾红尘柠檬奶"],
+                    "launchDate": "2026-06-18",
+                    "day30": "2026-07-18",
+                    "report": {"text": "社媒评论统计.xlsx", "link": "social"},
+                },
+            )
+            unrelated_record = dingtalk_table.TaskRecord(
+                "unrelated-social",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": ["不应进入报告"],
+                    "launchDate": "2026-06-18",
+                    "day30": "2026-07-18",
+                    "report": {"text": "社媒评论统计.xlsx", "link": "unrelated"},
+                },
+            )
+
+            def download(_config, value, _output_dir):
+                link = value.get("link") if isinstance(value, dict) else ""
+                return {
+                    "mt": mt,
+                    "elm": elm,
+                    "social": social,
+                    "unrelated": unrelated_social,
+                }.get(link)
+
+            with (
+                patch("service.jobs.load_configs", return_value=configs),
+                patch("service.jobs.dingtalk_table.mark_status"),
+                patch("service.jobs.dingtalk_table.fetch_record", return_value=main_record),
+                patch(
+                    "service.jobs.dingtalk_table.fetch_records",
+                    return_value=[social_record, unrelated_record],
+                ),
+                patch("service.jobs._ensure_local_upload_folder", return_value="dated-folder") as ensure_folder,
+                patch("service.jobs.dingtalk_docs.download_linked_file", side_effect=download),
+                patch("service.jobs.generate_report", return_value=ReportBuildResult(output, ("图片缺失",))) as generate,
+                patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report") as upload,
+                patch("service.jobs.dingtalk_table.mark_links") as mark_links,
+                patch("service.jobs.dingtalk_table.update_feedback") as update_feedback,
+            ):
+                result = run_generate_report("record")
+
+        grouped_record = ensure_folder.call_args.args[1]
+        self.assertIs(grouped_record, main_record)
+        self.assertEqual(
+            grouped_record.cells["productName"],
+            ["糯青山柠檬奶", "雾红尘柠檬奶"],
+        )
+        self.assertEqual(generate.call_args.args[2], ["糯青山柠檬奶", "雾红尘柠檬奶"])
+        self.assertNotIn("不应进入报告", generate.call_args.args[2])
+        upload.assert_called_once_with({}, output, "dated-folder")
+        self.assertEqual(mark_links.call_args.args[2], {"report": (output.name, "https://example/report")})
+        self.assertIn("图片缺失", update_feedback.call_args.args[2])
+        self.assertEqual(
+            [item.args[2] for item in update_feedback.call_args_list],
+            [
+                "1/4 正在读取当前行的品牌、报告日期和关注新品",
+                "2/4 正在下载外卖数表和关注新品的社媒评论统计表",
+                "3/4 正在查找关注新品的产品信息并生成跟踪报告",
+                "4/4 正在上传跟踪报告到钉钉文档",
+                "报告已生成；部分资料暂无法获取：图片缺失",
+            ],
+        )
+        self.assertEqual(result["warnings"], ["图片缺失"])
+
+    def test_report_job_failure_feedback_names_the_active_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mt = root / "美团.xlsx"
+            elm = root / "饿了么.xlsx"
+            output = root / "报告.html"
+            for path in (mt, elm, output):
+                path.write_bytes(b"data")
+            configs = {
+                "dingtalk": {},
+                "dingtalk_docs": {},
+                "field_mapping": {"fields": {}},
+                "report_rules": {"outputDirectory": str(root / "outputs")},
+            }
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": ["糯青山柠檬奶"],
+                    "launchDate": "2026-07-18",
+                    "meituanData": {"link": "mt"},
+                    "elemeData": {"link": "elm"},
+                },
+            )
+
+            for failed_stage, expected_stage in (
+                ("read", "读取当前行信息"),
+                ("download", "下载资料"),
+                ("generate", "生成报告"),
+                ("upload", "上传报告"),
+            ):
+                with self.subTest(stage=failed_stage):
+                    def download(_config, value, _output_dir):
+                        if failed_stage == "download":
+                            raise RuntimeError("模拟下载失败")
+                        return {"mt": mt, "elm": elm}.get(value.get("link"))
+
+                    with (
+                        patch("service.jobs.load_configs", return_value=configs),
+                        patch("service.jobs.dingtalk_table.mark_status"),
+                        patch(
+                            "service.jobs.dingtalk_table.fetch_record",
+                            side_effect=(
+                                RuntimeError("模拟读取失败")
+                                if failed_stage == "read"
+                                else None
+                            ),
+                            return_value=record,
+                        ),
+                        patch("service.jobs.dingtalk_table.fetch_records", return_value=[]),
+                        patch("service.jobs._ensure_local_upload_folder", return_value="folder"),
+                        patch("service.jobs.dingtalk_docs.download_linked_file", side_effect=download),
+                        patch(
+                            "service.jobs.generate_report",
+                            side_effect=(
+                                RuntimeError("模拟生成失败")
+                                if failed_stage == "generate"
+                                else None
+                            ),
+                            return_value=ReportBuildResult(output, ()),
+                        ),
+                        patch(
+                            "service.jobs.dingtalk_docs.upload_file",
+                            side_effect=(
+                                RuntimeError("模拟上传失败")
+                                if failed_stage == "upload"
+                                else None
+                            ),
+                            return_value="https://example/report",
+                        ),
+                        patch("service.jobs.dingtalk_table.mark_links"),
+                        patch("service.jobs.dingtalk_table.update_feedback"),
+                        patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            run_generate_report("record")
+
+                    self.assertIn(
+                        f"报告生成失败（{expected_stage}）",
+                        mark_failed.call_args.args[2],
+                    )
+
+    def test_report_job_rejects_empty_current_row_products_in_first_stage(self) -> None:
+        configs = {
+            "dingtalk": {},
+            "field_mapping": {"fields": {}},
+            "report_rules": {},
+        }
+        record = dingtalk_table.TaskRecord(
+            "record",
+            {
+                "brand": {"name": "霸王茶姬"},
+                "productName": [],
+                "launchDate": "2026-07-18",
+            },
+        )
+        with (
+            patch("service.jobs.load_configs", return_value=configs),
+            patch("service.jobs.dingtalk_table.mark_status"),
+            patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
+            patch("service.jobs.dingtalk_table.update_feedback"),
+            patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "关注新品"):
+                run_generate_report("record")
+
+        self.assertIn(
+            "报告生成失败（读取当前行信息）：“关注新品”为空",
+            mark_failed.call_args.args[2],
+        )
+
+    def test_report_job_final_feedback_failure_does_not_change_success_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mt = root / "美团.xlsx"
+            elm = root / "饿了么.xlsx"
+            output = root / "报告.html"
+            for path in (mt, elm, output):
+                path.write_bytes(b"data")
+            configs = {
+                "dingtalk": {},
+                "dingtalk_docs": {},
+                "field_mapping": {"fields": {}},
+                "report_rules": {"outputDirectory": str(root / "outputs")},
+            }
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "brand": {"name": "霸王茶姬"},
+                    "productName": ["糯青山柠檬奶"],
+                    "launchDate": "2026-07-18",
+                    "meituanData": {"link": "mt"},
+                    "elemeData": {"link": "elm"},
+                },
+            )
+
+            def download(_config, value, _output_dir):
+                return {"mt": mt, "elm": elm}.get(value.get("link"))
+
+            with (
+                patch("service.jobs.load_configs", return_value=configs),
+                patch("service.jobs.dingtalk_table.mark_status"),
+                patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
+                patch("service.jobs.dingtalk_table.fetch_records", return_value=[]),
+                patch("service.jobs._ensure_local_upload_folder", return_value="folder"),
+                patch("service.jobs.dingtalk_docs.download_linked_file", side_effect=download),
+                patch(
+                    "service.jobs.generate_report",
+                    return_value=ReportBuildResult(output, ()),
+                ),
+                patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report"),
+                patch("service.jobs.dingtalk_table.mark_links") as mark_links,
+                patch(
+                    "service.jobs.dingtalk_table.update_feedback",
+                    side_effect=[None, None, None, None, RuntimeError("反馈回写失败")],
+                ),
+                patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
+            ):
+                result = run_generate_report("record")
+
+        self.assertTrue(result["ok"])
+        mark_links.assert_called_once()
+        mark_failed.assert_not_called()
+
+    def test_all_platform_results_use_link_cell_format(self) -> None:
         configs = {
             "dingtalk": {"baseId": "base", "tableId": "table"},
             "field_mapping": {
                 "fields": {
-                    "meituanData": {"fieldId": "mt"},
-                    "elemeData": {"fieldId": "elm"},
-                    "jdData": {"fieldId": "jd"},
+                    "productMenu": {"fieldId": "menu", "cellType": "link"},
+                    "meituanData": {"fieldId": "mt", "cellType": "link"},
+                    "elemeData": {"fieldId": "elm", "cellType": "link"},
+                    "jdData": {"fieldId": "jd", "cellType": "link"},
                 }
             },
         }
@@ -58,6 +322,7 @@ class DeliveryJobTests(unittest.TestCase):
                 configs,
                 "record",
                 {
+                    "productMenu": ("产品清单.xlsx", "https://example/menu"),
                     "meituanData": ("美团.xlsx", "https://example/mt"),
                     "elemeData": ("饿了么.xlsx", "https://example/elm"),
                     "jdData": ("京东.xlsx", "https://example/jd"),
@@ -65,19 +330,50 @@ class DeliveryJobTests(unittest.TestCase):
             )
 
         cells = update_cells.call_args.args[2]
-        self.assertEqual(cells["meituanData"], [{"url": "https://example/mt", "name": "美团.xlsx"}])
-        self.assertEqual(cells["elemeData"], [{"url": "https://example/elm", "name": "饿了么.xlsx"}])
-        self.assertEqual(cells["jdData"], [{"url": "https://example/jd", "name": "京东.xlsx"}])
+        self.assertEqual(cells["productMenu"], {"text": "产品清单.xlsx", "link": "https://example/menu"})
+        self.assertEqual(cells["meituanData"], {"text": "美团.xlsx", "link": "https://example/mt"})
+        self.assertEqual(cells["elemeData"], {"text": "饿了么.xlsx", "link": "https://example/elm"})
+        self.assertEqual(cells["jdData"], {"text": "京东.xlsx", "link": "https://example/jd"})
 
-    def test_attachment_fields_can_be_cleared_and_updated_without_status_metadata(self) -> None:
-        empty_record = dingtalk_table.TaskRecord(
-            "record", {"meituanData": None, "elemeData": None, "jdData": None}
+    def test_report_cell_format_follows_table_specific_configuration(self) -> None:
+        attachment_configs = {
+            "field_mapping": {
+                "fields": {"report": {"fieldId": "report-field", "cellType": "attachment"}}
+            }
+        }
+        link_configs = {
+            "field_mapping": {
+                "fields": {"report": {"fieldId": "report-field", "cellType": "link"}}
+            }
+        }
+        with patch("service.dingtalk_table._update_cells") as update_cells:
+            dingtalk_table.mark_links(
+                attachment_configs,
+                "record",
+                {"report": ("报告.html", "https://example/report")},
+            )
+            attachment_cells = update_cells.call_args.args[2]
+            dingtalk_table.mark_links(
+                link_configs,
+                "record",
+                {"report": ("社媒统计.xlsx", "https://example/social")},
+            )
+            link_cells = update_cells.call_args.args[2]
+
+        self.assertEqual(
+            attachment_cells["report"],
+            [{"url": "https://example/report", "name": "报告.html"}],
         )
-        with (
-            patch("service.dingtalk_table._update_cells") as update_cells,
-            patch("service.dingtalk_table.fetch_record", return_value=empty_record) as fetch_record,
-        ):
-            dingtalk_table.clear_attachment_fields({}, "record", ("meituanData", "elemeData", "jdData"))
+        self.assertEqual(
+            link_cells["report"],
+            {"text": "社媒统计.xlsx", "link": "https://example/social"},
+        )
+
+    def test_link_results_clear_without_attachment_polling(self) -> None:
+        with patch("service.dingtalk_table._update_cells") as update_cells:
+            dingtalk_table.clear_link_fields(
+                {}, "record", ("meituanData", "elemeData", "jdData")
+            )
             dingtalk_table.update_attachment_fields(
                 {}, "record", {"deliveryData": ("外卖数据.xlsx", "https://example/input")}
             )
@@ -86,7 +382,6 @@ class DeliveryJobTests(unittest.TestCase):
             update_cells.call_args_list[0].args[2],
             {"meituanData": "", "elemeData": "", "jdData": ""},
         )
-        fetch_record.assert_called_once_with({}, "record")
         self.assertEqual(
             update_cells.call_args_list[1].args[2],
             {"deliveryData": [{"url": "https://example/input", "name": "外卖数据.xlsx"}]},
@@ -94,23 +389,23 @@ class DeliveryJobTests(unittest.TestCase):
 
     def test_attachment_clear_retries_until_the_fields_are_empty(self) -> None:
         stale = dingtalk_table.TaskRecord(
-            "record", {"productMenu": [{"name": "旧产品清单.xlsx", "url": "https://example/old"}]}
+            "record", {"deliveryData": [{"name": "旧外卖数据.xlsx", "url": "https://example/old"}]}
         )
-        empty = dingtalk_table.TaskRecord("record", {"productMenu": None})
+        empty = dingtalk_table.TaskRecord("record", {"deliveryData": None})
         with (
             patch("service.dingtalk_table._update_cells") as update_cells,
             patch("service.dingtalk_table.fetch_record", side_effect=[stale, empty]) as fetch_record,
             patch("service.dingtalk_table.time.sleep") as sleep,
         ):
-            dingtalk_table.clear_attachment_fields({}, "record", ("productMenu",))
+            dingtalk_table.clear_attachment_fields({}, "record", ("deliveryData",))
 
-        update_cells.assert_called_once_with({}, "record", {"productMenu": ""})
+        update_cells.assert_called_once_with({}, "record", {"deliveryData": ""})
         self.assertEqual(fetch_record.call_count, 2)
         sleep.assert_called_once_with(dingtalk_table.ATTACHMENT_CLEAR_DELAY_SECONDS)
 
     def test_attachment_clear_fails_when_the_old_value_never_disappears(self) -> None:
         stale = dingtalk_table.TaskRecord(
-            "record", {"productMenu": [{"name": "旧产品清单.xlsx", "url": "https://example/old"}]}
+            "record", {"deliveryData": [{"name": "旧外卖数据.xlsx", "url": "https://example/old"}]}
         )
         with (
             patch("service.dingtalk_table._update_cells"),
@@ -119,12 +414,12 @@ class DeliveryJobTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "旧结果附件清空失败"):
                 dingtalk_table.clear_attachment_fields(
-                    {}, "record", ("productMenu",), attempts=3, delay_seconds=0
+                    {}, "record", ("deliveryData",), attempts=3, delay_seconds=0
                 )
 
         self.assertEqual(fetch_record.call_count, 3)
 
-    def test_product_menu_job_stops_before_generation_when_attachment_clear_fails(self) -> None:
+    def test_product_menu_job_stops_before_generation_when_link_clear_fails(self) -> None:
         configs = {"dingtalk": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
         record = dingtalk_table.TaskRecord(
             "record",
@@ -134,25 +429,25 @@ class DeliveryJobTests(unittest.TestCase):
             patch("service.jobs.load_configs", return_value=configs),
             patch("service.jobs.dingtalk_table.mark_status"),
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-            patch("service.jobs._task_docs_folder_id", return_value="shared-folder"),
+            patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
             patch(
-                "service.jobs.dingtalk_table.clear_attachment_fields",
-                side_effect=RuntimeError("旧结果附件清空失败，请刷新钉钉 AI 表后重试。"),
+                "service.jobs.dingtalk_table.clear_link_fields",
+                side_effect=RuntimeError("旧结果链接清空失败，请刷新钉钉 AI 表后重试。"),
             ),
             patch("service.jobs.prepare_product_menu") as prepare,
             patch("service.jobs.dingtalk_docs.upload_file") as upload,
             patch("service.jobs.dingtalk_table.update_feedback") as update_feedback,
             patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
         ):
-            with self.assertRaisesRegex(RuntimeError, "旧结果附件清空失败"):
+            with self.assertRaisesRegex(RuntimeError, "旧结果链接清空失败"):
                 run_prepare_product_menu("record")
 
         prepare.assert_not_called()
         upload.assert_not_called()
-        self.assertIn("旧结果附件清空失败", update_feedback.call_args.args[2])
-        self.assertIn("旧结果附件清空失败", mark_failed.call_args.args[2])
+        self.assertIn("旧结果链接清空失败", update_feedback.call_args.args[2])
+        self.assertIn("旧结果链接清空失败", mark_failed.call_args.args[2])
 
-    def test_delivery_job_stops_before_generation_when_attachment_clear_fails(self) -> None:
+    def test_delivery_job_stops_before_generation_when_link_clear_fails(self) -> None:
         configs = {"dingtalk": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
         record = dingtalk_table.TaskRecord(
             "record",
@@ -166,21 +461,21 @@ class DeliveryJobTests(unittest.TestCase):
             patch("service.jobs.load_configs", return_value=configs),
             patch("service.jobs.dingtalk_table.mark_status"),
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-            patch("service.jobs._task_docs_folder_id", return_value="shared-folder"),
+            patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
             patch(
-                "service.jobs.dingtalk_table.clear_attachment_fields",
-                side_effect=RuntimeError("旧结果附件清空失败，请刷新钉钉 AI 表后重试。"),
+                "service.jobs.dingtalk_table.clear_link_fields",
+                side_effect=RuntimeError("旧结果链接清空失败，请刷新钉钉 AI 表后重试。"),
             ),
             patch("service.jobs.generate_delivery_tables") as generate,
             patch("service.jobs.dingtalk_docs.upload_file") as upload,
             patch("service.jobs.dingtalk_table.mark_failed") as mark_failed,
         ):
-            with self.assertRaisesRegex(RuntimeError, "旧结果附件清空失败"):
+            with self.assertRaisesRegex(RuntimeError, "旧结果链接清空失败"):
                 run_generate_delivery_tables("record")
 
         generate.assert_not_called()
         upload.assert_not_called()
-        self.assertIn("旧结果附件清空失败", mark_failed.call_args.args[2])
+        self.assertIn("旧结果链接清空失败", mark_failed.call_args.args[2])
 
     def test_local_xlsx_is_uploaded_and_written_back_before_use(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,6 +525,10 @@ class DeliveryJobTests(unittest.TestCase):
         with (
             patch("service.jobs._single_local_xlsx") as local_lookup,
             patch("service.jobs._ensure_local_upload_folder") as ensure_folder,
+            patch(
+                "service.jobs.dingtalk_docs.folder_id_for_linked_node",
+                return_value="shared-folder",
+            ),
         ):
             folder_id = _ensure_dingtalk_input_attachment(
                 {"dingtalk_docs": {}}, record, "deliveryData", "外卖数据", "shared-folder"
@@ -238,6 +537,122 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertEqual(folder_id, "shared-folder")
         local_lookup.assert_not_called()
         ensure_folder.assert_not_called()
+
+    def test_linked_delivery_input_is_copied_into_the_dated_target_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloaded = root / "霸王茶姬-20260718.xlsx"
+            downloaded.write_bytes(b"xlsx")
+            configs = {
+                "dingtalk_docs": {},
+                "report_rules": {"outputDirectory": str(root / "outputs")},
+            }
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "deliveryData": [
+                        {
+                            "name": downloaded.name,
+                            "url": "https://alidocs.dingtalk.com/i/nodes/raw-node",
+                        }
+                    ]
+                },
+            )
+            with (
+                patch(
+                    "service.jobs.dingtalk_docs.folder_id_for_linked_node",
+                    return_value="old-undated-folder",
+                ),
+                patch(
+                    "service.jobs.dingtalk_docs.download_linked_file",
+                    return_value=downloaded,
+                ) as download,
+                patch(
+                    "service.jobs.dingtalk_docs.upload_file",
+                    return_value="https://docs/destination-copy",
+                ) as upload,
+                patch("service.jobs.dingtalk_table.update_attachment_fields") as update,
+            ):
+                folder_id = _ensure_dingtalk_input_attachment(
+                    configs,
+                    record,
+                    "deliveryData",
+                    "外卖数据",
+                    "dated-folder",
+                )
+
+        self.assertEqual(folder_id, "dated-folder")
+        download.assert_called_once()
+        upload.assert_called_once_with({}, downloaded, "dated-folder")
+        update.assert_called_once_with(
+            configs,
+            "record",
+            {"deliveryData": (downloaded.name, "https://docs/destination-copy")},
+        )
+        self.assertEqual(
+            record.cells["deliveryData"],
+            [{"url": "https://docs/destination-copy", "name": downloaded.name}],
+        )
+
+    def test_linked_product_menu_is_copied_and_written_back_as_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloaded = root / "霸王茶姬-20260718-产品清单.xlsx"
+            downloaded.write_bytes(b"xlsx")
+            configs = {
+                "dingtalk_docs": {},
+                "field_mapping": {
+                    "fields": {"productMenu": {"fieldId": "menu", "cellType": "link"}}
+                },
+                "report_rules": {"outputDirectory": str(root / "outputs")},
+            }
+            record = dingtalk_table.TaskRecord(
+                "record",
+                {
+                    "productMenu": {
+                        "text": downloaded.name,
+                        "link": "https://alidocs.dingtalk.com/i/nodes/menu-node",
+                    }
+                },
+            )
+            with (
+                patch(
+                    "service.jobs.dingtalk_docs.folder_id_for_linked_node",
+                    return_value="old-folder",
+                ),
+                patch(
+                    "service.jobs.dingtalk_docs.download_linked_file",
+                    return_value=downloaded,
+                ),
+                patch(
+                    "service.jobs.dingtalk_docs.upload_file",
+                    return_value="https://alidocs.dingtalk.com/i/nodes/new-menu-node",
+                ) as upload,
+                patch("service.jobs.dingtalk_table.update_link_fields") as update,
+            ):
+                folder_id = _ensure_dingtalk_input_attachment(
+                    configs, record, "productMenu", "产品清单", "dated-folder"
+                )
+
+        self.assertEqual(folder_id, "dated-folder")
+        upload.assert_called_once_with({}, downloaded, "dated-folder")
+        update.assert_called_once_with(
+            configs,
+            "record",
+            {
+                "productMenu": (
+                    downloaded.name,
+                    "https://alidocs.dingtalk.com/i/nodes/new-menu-node",
+                )
+            },
+        )
+        self.assertEqual(
+            record.cells["productMenu"],
+            {
+                "text": downloaded.name,
+                "link": "https://alidocs.dingtalk.com/i/nodes/new-menu-node",
+            },
+        )
 
     def test_ai_table_local_attachment_is_downloaded_promoted_and_written_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -333,12 +748,13 @@ class DeliveryJobTests(unittest.TestCase):
             {
                 "brand": {"id": "brand", "name": "爷爷不泡茶"},
                 "productName": {"refFieldType": "text", "value": ["栀子龙眼椰, 奇香青柠", "兰香，青柠"]},
+                "launchDate": "2026-07-17",
             },
         )
 
         self.assertEqual(
             _task_folder_name(record),
-            "爷爷不泡茶：栀子龙眼椰、奇香青柠、兰香、青柠",
+            "爷爷不泡茶：栀子龙眼椰、奇香青柠、兰香、青柠 20260717",
         )
 
     def test_local_upload_folder_uses_report_date_and_rejects_missing_metadata(self) -> None:
@@ -351,16 +767,23 @@ class DeliveryJobTests(unittest.TestCase):
                 "launchDate": "2026-07-17T00:00:00+08:00",
             },
         )
-        with patch(
-            "service.jobs.dingtalk_docs.ensure_local_upload_task_folder",
-            return_value=("task-folder", "https://example/task-folder"),
-        ) as ensure_folder:
+        with (
+            patch(
+                "service.jobs.dingtalk_docs.ensure_local_upload_month_folder",
+                return_value=("month-folder", "https://example/month-folder"),
+            ) as ensure_month,
+            patch("service.jobs.dingtalk_docs.child_folders", return_value=[]),
+            patch(
+                "service.jobs.dingtalk_docs.ensure_child_folder",
+                return_value=("task-folder", "https://example/task-folder"),
+            ) as ensure_folder,
+        ):
             self.assertEqual(_ensure_local_upload_folder(configs, complete), "task-folder")
+        ensure_month.assert_called_once_with(configs["dingtalk_docs"], 2026, 7)
         ensure_folder.assert_called_once_with(
             configs["dingtalk_docs"],
-            2026,
-            7,
-            "爷爷不泡茶：栀子龙眼椰、奇香青柠",
+            "month-folder",
+            "爷爷不泡茶：栀子龙眼椰、奇香青柠 20260717",
         )
 
         for cells, message in (
@@ -371,6 +794,34 @@ class DeliveryJobTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(RuntimeError, message):
                     _ensure_local_upload_folder(configs, dingtalk_table.TaskRecord("record", cells))
+
+    def test_delivery_reuses_dated_social_folder_with_same_products(self) -> None:
+        configs = {"dingtalk_docs": {}}
+        record = dingtalk_table.TaskRecord(
+            "record",
+            {
+                "brand": {"name": "霸王茶姬"},
+                "productName": {"value": ["糯青山柠檬奶", "雾红尘柠檬奶"]},
+                "launchDate": "2026-07-18",
+            },
+        )
+        with (
+            patch(
+                "service.jobs.dingtalk_docs.ensure_local_upload_month_folder",
+                return_value=("month", "https://example/month"),
+            ),
+            patch(
+                "service.jobs.dingtalk_docs.child_folders",
+                return_value=[
+                    ("shared", "霸王茶姬：雾红尘柠檬奶、糯青山柠檬奶 20260718")
+                ],
+            ),
+            patch("service.jobs.dingtalk_docs.ensure_child_folder") as ensure_child,
+        ):
+            folder_id = _ensure_local_upload_folder(configs, record)
+
+        self.assertEqual(folder_id, "shared")
+        ensure_child.assert_not_called()
 
     def test_local_upload_task_folder_reuses_year_month_and_task_hierarchy(self) -> None:
         config = {"localUploadRootFolderName": "原始文件：竞品新品跟踪反馈"}
@@ -581,14 +1032,35 @@ class DeliveryJobTests(unittest.TestCase):
                 return {"nodeId": "menu-node", "name": source.name}
 
             with (
-                patch("service.dingtalk_docs.delete_existing_file"),
+                patch("service.dingtalk_docs.delete_existing_file") as delete_existing,
                 patch("service.dingtalk_docs.call_docs_tool", side_effect=call_docs_tool),
                 patch("service.dingtalk_docs.urllib.request.urlopen", return_value=response),
             ):
                 dingtalk_docs.upload_file({}, source, "folder")
 
+        delete_existing.assert_called_once_with({}, "folder", source.name)
         commit_payload = next(payload for tool, payload in calls if tool == "commit_uploaded_file")
         self.assertIs(commit_payload["convertToOnlineDoc"], False)
+
+    def test_overwrite_removes_exact_and_numbered_duplicate_files(self) -> None:
+        nodes = [
+            {"nodeId": "exact", "name": "产品清单", "extension": "xlsx"},
+            {"nodeId": "copy-1", "name": "产品清单(1)", "extension": "xlsx"},
+            {"nodeId": "copy-2", "name": "产品清单(2).xlsx", "extension": "xlsx"},
+            {"nodeId": "other", "name": "其他文件", "extension": "xlsx"},
+        ]
+        with (
+            patch("service.dingtalk_docs.list_nodes", return_value=nodes),
+            patch("service.dingtalk_docs.call_docs_tool") as mcp,
+        ):
+            dingtalk_docs.delete_existing_file({}, "folder", "产品清单.xlsx")
+
+        deleted_ids = [
+            item.args[2]["nodeId"]
+            for item in mcp.call_args_list
+            if item.args[1] == "delete_document"
+        ]
+        self.assertEqual(deleted_ids, ["exact", "copy-1", "copy-2"])
 
     def test_dingtalk_link_takes_priority_over_stale_same_named_local_file(self) -> None:
         value = [{"name": "产品清单.xlsx", "url": "https://alidocs.dingtalk.com/i/nodes/menu-node"}]
@@ -665,12 +1137,12 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertEqual(empty, ["饿了么", "京东"])
 
     def test_delivery_completion_messages_list_empty_platforms_without_suffixes(self) -> None:
-        self.assertEqual(_delivery_completion_message([]), "已生成外卖数表")
-        self.assertEqual(_delivery_completion_message(["京东"]), "已生成外卖数表，京东无数据")
-        self.assertEqual(_delivery_completion_message(["美团", "京东"]), "已生成外卖数表，美团、京东无数据")
+        self.assertEqual(_delivery_completion_message([]), "外卖数据统计完毕")
+        self.assertEqual(_delivery_completion_message(["京东"]), "外卖数据统计完毕，京东无数据")
+        self.assertEqual(_delivery_completion_message(["美团", "京东"]), "外卖数据统计完毕，美团、京东无数据")
         self.assertEqual(
             _delivery_completion_message(["美团", "饿了么", "京东"]),
-            "已生成外卖数表，美团、饿了么、京东无数据",
+            "外卖数据统计完毕，美团、饿了么、京东无数据",
         )
 
     def test_product_menu_keeps_progress_steps_and_uses_review_completion_message(self) -> None:
@@ -702,11 +1174,11 @@ class DeliveryJobTests(unittest.TestCase):
                 patch("service.jobs._task_delivery_input_dir", return_value=root / "raw"),
                 patch("service.jobs._ensure_dingtalk_input_attachment", return_value="shared-folder"),
                 patch("service.jobs.prepare_product_menu", side_effect=prepare),
-                patch("service.jobs._task_docs_folder_id", return_value="shared-folder"),
+                patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
                 patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/menu"),
                 patch("service.jobs.dingtalk_table.mark_links"),
                 patch(
-                    "service.jobs.dingtalk_table.clear_attachment_fields",
+                    "service.jobs.dingtalk_table.clear_link_fields",
                     side_effect=lambda *args: events.append("clear"),
                 ) as clear_fields,
                 patch("service.jobs.dingtalk_table.update_feedback") as update_feedback,
@@ -723,7 +1195,7 @@ class DeliveryJobTests(unittest.TestCase):
                 "2/4 正在提取产品清单",
                 "3/4 正在标记上新不满32天的产品",
                 "4/4 正在上传到钉钉文档",
-                "已生成，请人工检查产品清单上新日期标注是否完整。",
+                "已提取产品清单，请确认在售不满30日的新品上新日期标注无遗漏后，再进行外卖数据统计",
             ],
         )
 
@@ -733,9 +1205,9 @@ class DeliveryJobTests(unittest.TestCase):
             annotation_path = root / "产品清单.xlsx"
             annotation_path.write_bytes(b"annotation")
             outputs = {
-                "meituanData": root / "美团外卖数据.xlsx",
-                "elemeData": root / "饿了么外卖数据.xlsx",
-                "jdData": root / "京东外卖数据.xlsx",
+                "meituanData": root / "茉莉奶白-20260710-美团.xlsx",
+                "elemeData": root / "茉莉奶白-20260710-饿了么.xlsx",
+                "jdData": root / "茉莉奶白-20260710-京东.xlsx",
             }
             for path in outputs.values():
                 path.write_bytes(b"result")
@@ -762,7 +1234,11 @@ class DeliveryJobTests(unittest.TestCase):
                 patch("service.jobs.load_configs", return_value=configs),
                 patch("service.jobs.dingtalk_table.mark_status"),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-                patch("service.jobs._task_docs_folder_id", return_value="shared-folder"),
+                patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+                patch(
+                    "service.jobs.dingtalk_docs.folder_id_for_linked_node",
+                    return_value="shared-folder",
+                ),
                 patch("service.jobs._task_delivery_input_dir", return_value=root / "raw"),
                 patch("service.jobs._task_annotation_path", return_value=annotation_path),
                 patch(
@@ -776,7 +1252,7 @@ class DeliveryJobTests(unittest.TestCase):
                 ) as upload_file,
                 patch("service.jobs._filter_links_for_existing_fields", side_effect=lambda configs, links: links),
                 patch(
-                    "service.jobs.dingtalk_table.clear_attachment_fields",
+                    "service.jobs.dingtalk_table.clear_link_fields",
                     side_effect=lambda *args: events.append("clear"),
                 ) as clear_fields,
                 patch("service.jobs.dingtalk_table.mark_links", side_effect=lambda *args: events.append("links")) as mark_links,
@@ -795,7 +1271,7 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertEqual([item.args[2] for item in upload_file.call_args_list], ["shared-folder"] * 2)
         self.assertEqual(
             [item.args[1].name for item in upload_file.call_args_list],
-            ["美团外卖数据.xlsx", "饿了么外卖数据.xlsx"],
+            ["茉莉奶白-20260710-美团.xlsx", "茉莉奶白-20260710-饿了么.xlsx"],
         )
         self.assertTrue(jd_file_was_removed)
         written_links = mark_links.call_args.args[2]
@@ -808,10 +1284,10 @@ class DeliveryJobTests(unittest.TestCase):
                 "1/3 正在下载外卖数据和产品清单",
                 "2/3 正在生成外卖数表",
                 "3/3 正在上传外卖数表到钉钉文档",
-                "已生成外卖数表，京东无数据",
+                "外卖数据统计完毕，京东无数据",
             ],
         )
-        self.assertLess(events.index("links"), events.index("已生成外卖数表，京东无数据"))
+        self.assertLess(events.index("links"), events.index("外卖数据统计完毕，京东无数据"))
 
     def test_delivery_job_with_all_platforms_empty_uploads_nothing_and_still_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -819,9 +1295,9 @@ class DeliveryJobTests(unittest.TestCase):
             annotation_path = root / "产品清单.xlsx"
             annotation_path.write_bytes(b"annotation")
             outputs = {
-                "meituanData": root / "美团外卖数据.xlsx",
-                "elemeData": root / "饿了么外卖数据.xlsx",
-                "jdData": root / "京东外卖数据.xlsx",
+                "meituanData": root / "茉莉奶白-20260710-美团.xlsx",
+                "elemeData": root / "茉莉奶白-20260710-饿了么.xlsx",
+                "jdData": root / "茉莉奶白-20260710-京东.xlsx",
             }
             for path in outputs.values():
                 path.write_bytes(b"header-only")
@@ -846,8 +1322,12 @@ class DeliveryJobTests(unittest.TestCase):
                 patch("service.jobs.load_configs", return_value=configs),
                 patch("service.jobs.dingtalk_table.mark_status"),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-                patch("service.jobs._task_docs_folder_id", return_value="shared-folder"),
-                patch("service.jobs.dingtalk_table.clear_attachment_fields"),
+                patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+                patch(
+                    "service.jobs.dingtalk_docs.folder_id_for_linked_node",
+                    return_value="shared-folder",
+                ),
+                patch("service.jobs.dingtalk_table.clear_link_fields"),
                 patch("service.jobs._task_delivery_input_dir", return_value=root / "raw"),
                 patch("service.jobs._task_annotation_path", return_value=annotation_path),
                 patch("service.jobs.generate_delivery_tables", return_value=outputs),
@@ -872,7 +1352,7 @@ class DeliveryJobTests(unittest.TestCase):
         mark_links.assert_called_once_with(configs, "record", {}, "外卖数据已生成")
         self.assertEqual(
             update_feedback.call_args_list[-1].args[2],
-            "已生成外卖数表，美团、饿了么、京东无数据",
+            "外卖数据统计完毕，美团、饿了么、京东无数据",
         )
 
     def test_delivery_failure_keeps_cleared_result_fields_and_does_not_delete_remote_files(self) -> None:
@@ -897,8 +1377,12 @@ class DeliveryJobTests(unittest.TestCase):
             patch("service.jobs.load_configs", return_value=configs),
             patch("service.jobs.dingtalk_table.mark_status"),
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
-            patch("service.jobs._task_docs_folder_id", return_value="shared-folder"),
-            patch("service.jobs.dingtalk_table.clear_attachment_fields") as clear_fields,
+            patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+            patch(
+                "service.jobs.dingtalk_docs.folder_id_for_linked_node",
+                return_value="shared-folder",
+            ),
+            patch("service.jobs.dingtalk_table.clear_link_fields") as clear_fields,
             patch("service.jobs._task_delivery_input_dir", side_effect=RuntimeError("download failed")),
             patch("service.jobs.dingtalk_table.mark_failed"),
             patch("service.jobs.dingtalk_table.mark_links") as mark_links,

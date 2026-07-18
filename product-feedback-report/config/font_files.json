@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "HTML 报告字体配置，默认复用周报内部字体文件。",
+  "fontDirectory": "../new-product-monitor/assets/fonts",
+  "defaultFonts": {
+    "cssFamily": "Microsoft YaHei, PingFang SC, Arial, sans-serif"
+  },
+  "chineseFont": {
+    "fileName": "方正FW筑紫黑简 R.ttf"
+  },
+  "latinFont": {
+    "fileName": "Heytea Sans Serif Regular.otf"
+  },
+  "notes": [
+    "字体文件缺失时使用 defaultFonts.cssFamily，不阻断报告生成。",
+    "内部字体只会以内嵌 data URI 写入生成的 HTML，不上传为独立文件。"
+  ]
+}

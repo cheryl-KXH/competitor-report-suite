@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weibo")
     parser.add_argument("--xiaohongshu")
     parser.add_argument("--douyin")
+    parser.add_argument("--bilibili")
     parser.add_argument("--brand", required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--start-date", required=True)
@@ -69,6 +70,7 @@ def main() -> int:
             "weibo": args.weibo,
             "xiaohongshu": args.xiaohongshu,
             "douyin": args.douyin,
+            "bilibili": args.bilibili,
         }.items()
         if value
     }

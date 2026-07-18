@@ -11,15 +11,12 @@ from typing import Any
 
 ATTACHMENT_KEYS = {
     "deliveryData",
-    "productMenu",
-    "meituanData",
-    "elemeData",
-    "jdData",
     "weibo",
     "xiaohongshu",
     "douyin",
+    "bilibili",
 }
-LINK_KEYS = {"report"}
+LINK_KEYS = {"productMenu", "meituanData", "elemeData", "jdData", "report"}
 ATTACHMENT_CLEAR_ATTEMPTS = 5
 ATTACHMENT_CLEAR_DELAY_SECONDS = 0.5
 
@@ -240,10 +237,24 @@ def update_attachment_fields(
     _update_cells(configs, record_id, {key: attachment_cell(name, url) for key, (name, url) in links.items()})
 
 
+def update_link_fields(
+    configs: dict[str, dict[str, Any]], record_id: str, links: dict[str, tuple[str, str]]
+) -> None:
+    unknown = set(links) - LINK_KEYS
+    if unknown:
+        raise ValueError(f"不是链接字段：{', '.join(sorted(unknown))}")
+    _update_cells(
+        configs,
+        record_id,
+        {key: link_cell(name, url) for key, (name, url) in links.items()},
+    )
+
+
 def mark_links(configs: dict[str, dict[str, Any]], record_id: str, links: dict[str, tuple[str, str]], status: str | None = None) -> None:
     cells: dict[str, Any] = {}
     for key, (name, url) in links.items():
-        if key in ATTACHMENT_KEYS:
+        configured_type = str(field_defs(configs).get(key, {}).get("cellType") or "").strip().lower()
+        if configured_type == "attachment" or (not configured_type and key in ATTACHMENT_KEYS):
             cells[key] = attachment_cell(name, url)
         else:
             cells[key] = link_cell(name, url)

@@ -32,6 +32,8 @@ def load_configs() -> dict[str, dict[str, Any]]:
         "field_mapping": load_optional_json("field_mapping.json"),
         "platform_rules": load_optional_json("platform_rules.json"),
         "report_rules": load_optional_json("report_rules.json"),
+        "html_layout": load_optional_json("html_layout.json"),
+        "font_files": load_optional_json("font_files.json"),
     }
 
 
@@ -41,4 +43,3 @@ def output_root(configs: dict[str, dict[str, Any]]) -> Path:
     if not path.is_absolute():
         path = ROOT / path
     return path
-

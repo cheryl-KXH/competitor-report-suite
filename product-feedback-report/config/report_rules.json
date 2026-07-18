@@ -13,6 +13,8 @@
   "productInfoSource": {
     "baseId": "14lgGw3P8vvl1yqpiGv2oZoO85daZ90D",
     "tableId": "hERWDMS",
+    "brandFieldId": "01ZM8y7",
+    "launchDateFieldId": "mKUEya0",
     "matchFields": [
       "brand",
       "productName",
