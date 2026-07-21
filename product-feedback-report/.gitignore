@@ -3,6 +3,8 @@ __pycache__/
 .DS_Store
 .env
 outputs/
+output/
+tmp/
 config/dingtalk.json
 config/dingtalk_docs.json
 
