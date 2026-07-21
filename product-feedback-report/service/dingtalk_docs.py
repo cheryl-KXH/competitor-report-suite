@@ -114,6 +114,13 @@ def node_id_from_url(value: str) -> str:
     return match.group(1) if match else ""
 
 
+def node_url(node_id: str) -> str:
+    clean_id = str(node_id or "").strip()
+    if not clean_id:
+        raise RuntimeError("钉钉文档节点 ID 为空，无法生成访问链接。")
+    return f"https://alidocs.dingtalk.com/i/nodes/{clean_id}"
+
+
 def _data_payload(result: dict[str, Any]) -> Any:
     if "data" in result:
         return result["data"]

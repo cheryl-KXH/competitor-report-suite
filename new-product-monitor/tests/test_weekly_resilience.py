@@ -146,6 +146,8 @@ class ResponsiveHtmlTests(unittest.TestCase):
         self.assertIn("@media (min-width: 768px)", source)
         self.assertIn("@media (max-width: 767px)", source)
         self.assertIn("touch-action: pan-y pinch-zoom", source)
+        self.assertIn("panX = dragStartPanX + dx / currentScale", source)
+        self.assertIn("th, td {{ border-width: 1.5px; }}", source)
         self.assertIn("window.matchMedia('(max-width: 767px)')", source)
         self.assertNotIn("touch-action: none", source)
         self.assertNotIn("@media (hover:", source)

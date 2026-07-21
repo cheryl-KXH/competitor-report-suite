@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from service.jobs import (
     run_generate_report,
     run_prepare_product_menu,
 )
-from service.schemas import AcceptedResponse, HealthResponse
+from service.schemas import AcceptedResponse, FinalizeResponse, HealthResponse
 
 
 app = FastAPI(title="Product Feedback Report Service")
@@ -110,14 +111,12 @@ async def generate_report(request: Request) -> AcceptedResponse:
     return AcceptedResponse(ok=True, status="accepted", recordId=record_id, message="报告生成任务已接收。")
 
 
-@app.post("/finalize-report", response_model=AcceptedResponse)
-async def finalize_report(request: Request) -> AcceptedResponse:
+@app.post("/finalize-report", response_model=FinalizeResponse)
+async def finalize_report(request: Request) -> FinalizeResponse:
     record_id, secret = await parse_request(request)
     require_secret(secret)
-    _submit(run_finalize_report, record_id)
-    return AcceptedResponse(
-        ok=True,
-        status="accepted",
-        recordId=record_id,
-        message="原始文件归档任务已接收。",
-    )
+    try:
+        result = await asyncio.to_thread(run_finalize_report, record_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FinalizeResponse(**result)

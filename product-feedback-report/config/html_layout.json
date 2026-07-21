@@ -17,11 +17,14 @@
   "fonts": {
     "chineseFontFileKey": "chineseFont",
     "latinFontFileKey": "latinFont",
-    "defaultSizePx": 12,
-    "titleSizePx": 21,
+    "defaultSizePx": 16,
+    "bodyLineHeightPx": 26.67,
+    "titleSizePx": 21.33,
     "sectionSizePx": 16,
-    "productTitleSizePx": 17,
-    "smallSizePx": 10,
+    "productTitleSizePx": 16,
+    "smallSizePx": 13.33,
+    "sourceNoteSizePx": 13.33,
+    "letterSpacingCm": 0.02,
     "fallbackFamily": "Microsoft YaHei, PingFang SC, Arial, sans-serif"
   },
   "colors": {
@@ -30,14 +33,18 @@
     "headerFill": "D9D9D9",
     "labelFill": "E7EFFA",
     "trackedFill": "FCE4D6",
-    "muted": "666666"
+    "muted": "666666",
+    "sourceNote": "999999"
   },
   "tables": {
-    "borderWidthPx": 1,
-    "cellPaddingVerticalPx": 5,
-    "cellPaddingHorizontalPx": 6
+    "borderWidthPx": 0.5,
+    "cellPaddingVerticalPx": 0,
+    "cellPaddingHorizontalPx": 6,
+    "fontSizePx": 13.33,
+    "lineHeightPx": 20
   },
   "productImage": {
+    "heightCm": 4,
     "maxWidthPx": 300,
     "maxHeightPx": 220
   }

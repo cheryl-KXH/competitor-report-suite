@@ -584,6 +584,7 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
   .report-viewport {{ width: 100vw; margin: 0; overflow: hidden; touch-action: pan-y pinch-zoom; }}
   .report-scale {{ margin: 0; will-change: transform; }}
   .report {{ margin: 0; }}
+  th, td {{ border-width: 1.5px; }}
 }}
 {row_height_css}
 """
@@ -598,6 +599,12 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
   var userScale = 1;
   var pinchStartDistance = 0;
   var pinchStartScale = 1;
+  var currentScale = 1;
+  var panX = 0;
+  var dragStartX = 0;
+  var dragStartY = 0;
+  var dragStartPanX = 0;
+  var dragDirection = '';
 
   function isMobilePreview() {{
     return window.matchMedia('(max-width: 767px)').matches;
@@ -618,6 +625,8 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
     if (!isMobilePreview()) {{
       baseScale = 1;
       userScale = 1;
+      currentScale = 1;
+      panX = 0;
       viewport.style.width = reportWidth + 'px';
       viewport.style.height = '';
       scaleWrap.style.transform = '';
@@ -626,7 +635,10 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
     var viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || reportWidth);
     baseScale = Math.min(1, viewportWidth / reportWidth);
     var scale = baseScale * userScale;
-    scaleWrap.style.transform = 'scale(' + scale + ')';
+    currentScale = scale;
+    var maxPan = Math.max(0, reportWidth - viewportWidth / scale);
+    panX = clamp(panX, -maxPan, 0);
+    scaleWrap.style.transform = 'scale(' + scale + ') translateX(' + panX + 'px)';
     viewport.style.width = '100vw';
     viewport.style.height = (report.offsetHeight * scale) + 'px';
   }}
@@ -640,19 +652,39 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
     window.addEventListener('orientationchange', function() {{ setTimeout(applyScale, 200); }}, {{ passive: true }});
     if (!viewport) return;
     viewport.addEventListener('touchstart', function(event) {{
-      if (event.touches.length !== 2) return;
-      pinchStartDistance = touchDistance(event.touches);
-      pinchStartScale = userScale;
-      event.preventDefault();
+      if (event.touches.length === 2) {{
+        pinchStartDistance = touchDistance(event.touches);
+        pinchStartScale = userScale;
+        dragDirection = '';
+        event.preventDefault();
+      }} else if (event.touches.length === 1 && userScale > 1) {{
+        dragStartX = event.touches[0].clientX;
+        dragStartY = event.touches[0].clientY;
+        dragStartPanX = panX;
+        dragDirection = '';
+      }}
     }}, {{ passive: false }});
     viewport.addEventListener('touchmove', function(event) {{
-      if (event.touches.length !== 2 || !pinchStartDistance) return;
-      userScale = clamp(pinchStartScale * (touchDistance(event.touches) / pinchStartDistance), 1, 4);
+      if (event.touches.length === 2 && pinchStartDistance) {{
+        userScale = clamp(pinchStartScale * (touchDistance(event.touches) / pinchStartDistance), 1, 4);
+        applyScale();
+        event.preventDefault();
+        return;
+      }}
+      if (event.touches.length !== 1 || userScale <= 1) return;
+      var dx = event.touches[0].clientX - dragStartX;
+      var dy = event.touches[0].clientY - dragStartY;
+      if (!dragDirection && Math.max(Math.abs(dx), Math.abs(dy)) > 6) {{
+        dragDirection = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
+      }}
+      if (dragDirection !== 'horizontal') return;
+      panX = dragStartPanX + dx / currentScale;
       applyScale();
       event.preventDefault();
     }}, {{ passive: false }});
     viewport.addEventListener('touchend', function(event) {{
       if (event.touches.length < 2) pinchStartDistance = 0;
+      if (event.touches.length === 0) dragDirection = '';
     }}, {{ passive: true }});
   }}
 

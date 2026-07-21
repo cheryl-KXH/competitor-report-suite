@@ -11,16 +11,14 @@ if str(ROOT) not in sys.path:
 
 from service.config import load_configs, output_root
 from scripts.social.processing import (
-    SOCIAL_PLATFORMS,
     build_social_feedback_workbook,
-    empty_platform_summary,
-    summarize_social_file,
+    summarize_social_cleaned_workbook,
 )
 
 
 def generate_consumer_feedback_tables(
     record_id: str,
-    platform_files: dict[str, Path],
+    cleaned_raw_data: Path,
     *,
     brand: str,
     product: str,
@@ -31,12 +29,7 @@ def generate_consumer_feedback_tables(
     configs = load_configs()
     out_dir = output_dir or output_root(configs) / record_id / "consumer_feedback_tables"
     out_dir.mkdir(parents=True, exist_ok=True)
-    summaries = [
-        summarize_social_file(key, label, platform_files[key])
-        if key in platform_files
-        else empty_platform_summary(key, label)
-        for key, label in SOCIAL_PLATFORMS
-    ]
+    summaries = summarize_social_cleaned_workbook(cleaned_raw_data)
     return build_social_feedback_workbook(
         brand=brand,
         product=product,
@@ -50,10 +43,7 @@ def generate_consumer_feedback_tables(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="统计消费者反馈标签数表")
     parser.add_argument("--record-id", required=True)
-    parser.add_argument("--weibo")
-    parser.add_argument("--xiaohongshu")
-    parser.add_argument("--douyin")
-    parser.add_argument("--bilibili")
+    parser.add_argument("--cleaned-raw-data", required=True)
     parser.add_argument("--brand", required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--start-date", required=True)
@@ -64,19 +54,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    platform_files = {
-        key: Path(value)
-        for key, value in {
-            "weibo": args.weibo,
-            "xiaohongshu": args.xiaohongshu,
-            "douyin": args.douyin,
-            "bilibili": args.bilibili,
-        }.items()
-        if value
-    }
     output = generate_consumer_feedback_tables(
         args.record_id,
-        platform_files,
+        Path(args.cleaned_raw_data),
         brand=args.brand,
         product=args.product,
         start_date=args.start_date,

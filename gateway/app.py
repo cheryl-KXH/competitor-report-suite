@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -44,6 +45,17 @@ class AcceptedResponse(BaseModel):
     status: str
     recordId: str
     message: str = ""
+
+
+class FinalizeResponse(BaseModel):
+    ok: bool
+    status: str
+    recordId: str
+    message: str
+    reportUrl: str
+    folderUrl: str
+    archivedFileCount: int
+    archivedFileNames: str
 
 
 app = FastAPI(title="Competitor Report Gateway")
@@ -109,6 +121,35 @@ def _submit(project_root: Path, function_name: str, record_id: str) -> None:
     executor.submit(_run_python_job, project_root, function_name, record_id)
 
 
+def _run_python_job_result(
+    project_root: Path, function_name: str, record_id: str
+) -> dict[str, Any]:
+    marker = "__REPORT_JOB_RESULT__"
+    code = (
+        "import json\n"
+        f"from service.jobs import {function_name}\n"
+        f"result = {function_name}({record_id!r})\n"
+        f"print({marker!r} + json.dumps(result, ensure_ascii=False))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail.splitlines()[-1] if detail else "归档任务执行失败。")
+    for line in reversed(result.stdout.splitlines()):
+        if line.startswith(marker):
+            payload = json.loads(line[len(marker) :])
+            if isinstance(payload, dict):
+                return payload
+            break
+    raise RuntimeError("归档任务未返回有效结果。")
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -156,3 +197,19 @@ async def generate_report(request: Request) -> AcceptedResponse:
     require_secret(secret)
     _submit(FEEDBACK_ROOT, "run_generate_report", record_id)
     return AcceptedResponse(ok=True, status="accepted", recordId=record_id, message="报告生成任务已接收。")
+
+
+@app.post("/finalize-report", response_model=FinalizeResponse)
+async def finalize_report(request: Request) -> FinalizeResponse:
+    record_id, secret = await parse_request(request)
+    require_secret(secret)
+    try:
+        result = await asyncio.to_thread(
+            _run_python_job_result,
+            FEEDBACK_ROOT,
+            "run_finalize_report",
+            record_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FinalizeResponse(**result)

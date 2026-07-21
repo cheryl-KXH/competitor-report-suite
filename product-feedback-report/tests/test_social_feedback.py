@@ -13,23 +13,183 @@ from scripts.social.processing import (
     PlatformSummary,
     build_social_feedback_workbook,
     normalize_social_product_key,
+    social_cleaned_workbook_products,
     social_workbook_products,
     split_social_workbook,
+    summarize_social_cleaned_workbook,
     summarize_social_rows,
 )
 from service import dingtalk_table
 from service.jobs import (
+    _collect_social_inputs,
     _consumer_feedback_configs,
+    _download_social_input_source,
     _ensure_social_archive_folder,
     _prepare_social_input,
     _same_social_day_record_index,
+    _social_cleaned_input_filename,
     _social_input_filename,
     _wait_for_ai_table_attachment_url,
     run_generate_consumer_feedback_tables,
 )
 
 
+def _write_cleaned_social_workbook(
+    path: Path,
+    product: str,
+    *,
+    extra_product: str | None = None,
+) -> Path:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+
+    screenshot = workbook.create_sheet("大众点评-截图")
+    screenshot.append(["评价内容", "情感识别", "标签-1"])
+    screenshot.append(["忽略这张表", "负向", "不应被统计"])
+
+    dianping = workbook.create_sheet("大众点评")
+    dianping.append([None, None, None, None, None])
+    dianping.append([None, "大众点评好评", "评论数", "大众点评差评", "评论数"])
+    dianping.append([None, "清爽不腻", 3, "太甜", 2])
+    dianping.append([None, "好评用户数", 4, "差评用户数", 2])
+
+    header = [
+        "品牌",
+        "主贴id",
+        "产品名称",
+        "情感识别",
+        "评价1-对应标签",
+        "评价2-对应标签",
+    ]
+    for platform in ("微博", "小红书", "抖音", "B站"):
+        sheet = workbook.create_sheet(platform)
+        sheet.append(header)
+    workbook["微博"].append(["古茗", "w1", product, "正向", "好喝", "清爽"])
+    workbook["微博"].append(["古茗", "w2", product, "负向", "味道怪", None])
+    workbook["小红书"].append(["古茗", "x1", product, "正向", "适合夏天", None])
+    if extra_product:
+        workbook["抖音"].append(["古茗", "d1", extra_product, "正向", "好喝", None])
+    workbook.save(path)
+    return path
+
+
 class SocialFeedbackStatisticsTests(unittest.TestCase):
+    def test_report_collection_reads_archived_dingtalk_social_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_cleaned_social_workbook(
+                root / "古茗-20260718-咸乳酪泰奶-社媒清洗数据.xlsx",
+                "咸乳酪泰奶",
+            )
+            record = dingtalk_table.TaskRecord(
+                "social",
+                {
+                    "brand": {"name": "古茗"},
+                    "productName": "咸乳酪泰奶",
+                    "socialCleanedRawData": [
+                        {
+                            "name": source.name,
+                            "url": "https://alidocs.dingtalk.com/i/nodes/weibo-node",
+                        }
+                    ],
+                },
+            )
+            product_key = normalize_social_product_key("咸乳酪泰奶")
+            matches = {
+                product_key: (
+                    "咸乳酪泰奶",
+                    record,
+                    date(2026, 6, 18),
+                )
+            }
+
+            with patch(
+                "service.jobs._download_linked_social_file",
+                return_value=source,
+            ) as download_linked:
+                collected = _collect_social_inputs(
+                    {}, matches, root / "workspace"
+                )
+
+            expected_target = (
+                root
+                / "workspace"
+                / "social_sources"
+                / "social"
+                / "socialCleanedRawData"
+            )
+            download_linked.assert_called_once_with(
+                {},
+                record,
+                "socialCleanedRawData",
+                "社媒CleanedRawData",
+                target_dir=expected_target,
+            )
+            self.assertEqual(collected[product_key], source)
+
+    def test_unreadable_dingtalk_social_link_requests_local_xlsx(self) -> None:
+        record = dingtalk_table.TaskRecord(
+            "social",
+            {
+                "socialCleanedRawData": [
+                    {
+                        "name": "古茗-20260718-咸乳酪泰奶-社媒清洗数据.xlsx",
+                        "url": "https://alidocs.dingtalk.com/i/nodes/weibo-node",
+                    }
+                ]
+            },
+        )
+        with patch(
+            "service.jobs._download_linked_social_file",
+            side_effect=RuntimeError("下载超时"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"\[古茗-20260718-咸乳酪泰奶-社媒清洗数据\.xlsx\]已归档为钉钉文档链接导致读取失败，"
+                "请重新从本地上传原始文件，再进行报告生成",
+            ):
+                _download_social_input_source(
+                    {}, record, "socialCleanedRawData", "社媒CleanedRawData"
+                )
+
+    def test_report_lists_unreadable_archived_cleaned_file(self) -> None:
+        record = dingtalk_table.TaskRecord(
+            "social",
+            {
+                "brand": {"name": "古茗"},
+                "productName": "青橘芦荟冰冰茶",
+                "socialCleanedRawData": [
+                    {
+                        "name": "古茗-20260718-青橘芦荟冰冰茶-社媒清洗数据.xlsx",
+                        "url": "https://alidocs.dingtalk.com/i/nodes/weibo-node",
+                    }
+                ],
+            },
+        )
+        product_key = normalize_social_product_key("青橘芦荟冰冰茶")
+        matches = {
+            product_key: (
+                "青橘芦荟冰冰茶",
+                record,
+                date(2026, 6, 18),
+            )
+        }
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "service.jobs._download_linked_social_file",
+            side_effect=RuntimeError("无可下载 URL"),
+        ) as download_linked:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"\[古茗-20260718-青橘芦荟冰冰茶-社媒清洗数据\.xlsx\]"
+                "已归档为钉钉文档链接导致读取失败",
+            ):
+                _collect_social_inputs(
+                    {}, matches, Path(temporary) / "workspace"
+                )
+
+        self.assertEqual(download_linked.call_count, 1)
+
     def test_social_workbook_is_split_by_normalized_product_and_keeps_formatting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -96,16 +256,16 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "产品名称.*为空"):
                 social_workbook_products(blank)
 
-    def test_tags_can_count_on_both_sides_while_users_follow_sentiment(self) -> None:
+    def test_all_row_tags_and_users_follow_sentiment(self) -> None:
         rows = [
-            ["主贴id", "情感识别", "评价1-好/差评", "评价1-对应标签", "评价2-好/差评", "评价2-对应标签"],
-            ["p1", "正向", "好评", "好喝", "差评", "太甜"],
-            ["p2", "负向", "差评", "太甜", "", ""],
-            ["p3", "中性", "好评", "清爽", "", ""],
+            ["主贴id", "情感识别", "评价1-对应标签", "评价2-对应标签"],
+            ["p1", "正向", "好喝", "清爽"],
+            ["p2", "负向", "太甜", "味道怪"],
+            ["p3", "中性", "中性标签", ""],
         ]
         summary = summarize_social_rows("weibo", "微博", rows)
         self.assertEqual(summary.positive_tags, (("好喝", 1), ("清爽", 1)))
-        self.assertEqual(summary.negative_tags, (("太甜", 2),))
+        self.assertEqual(summary.negative_tags, (("味道怪", 1), ("太甜", 1)))
         self.assertEqual(summary.positive_users, 1)
         self.assertEqual(summary.negative_users, 1)
 
@@ -116,10 +276,10 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
     def test_real_export_shape_supports_five_evaluation_groups(self) -> None:
         header = ["品牌", "主贴id", "产品名称", "搜索关键词", "用户名", "内容", "发布时间", "链接", "情感识别"]
         for index in range(1, 6):
-            header.extend([f"评价{index}-好/差评", f"评价{index}-对应标签"])
+            header.append(f"评价{index}-对应标签")
         row = ["茉莉奶白", "p1", "青芒黄皮冰茶", "关键词", "用户", "内容", "2026-07-09", "链接", "正向"]
         for index in range(1, 6):
-            row.extend(["好评", f"标签{index}"])
+            row.append(f"标签{index}")
         summary = summarize_social_rows("douyin", "抖音", [header, row])
         self.assertEqual(sum(count for _, count in summary.positive_tags), 5)
         self.assertEqual(summary.positive_users, 1)
@@ -136,11 +296,8 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
                 "发布时间",
                 "链接",
                 "情感识别",
-                "评价1-好/差评",
                 "评价1-对应标签",
-                "评价2-好/差评",
                 "评价2-对应标签",
-                "评价3-好/差评",
                 "评价3-对应标签",
             ],
             [
@@ -153,11 +310,8 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
                 "2026-06-20 16:29:13",
                 "链接",
                 "负向",
-                "差评",
                 "难喝，不喜欢，不推荐",
-                "差评",
                 "奶盖拉跨",
-                "差评",
                 "性价比低/贵",
             ],
         ]
@@ -167,6 +321,49 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
             (("奶盖拉跨", 1), ("性价比低/贵", 1), ("难喝，不喜欢，不推荐", 1)),
         )
         self.assertEqual(summary.negative_users, 1)
+
+    def test_cleaned_workbook_uses_prepared_dianping_and_raw_platform_sheets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = _write_cleaned_social_workbook(
+                Path(temporary) / "古茗-20260718-青橘芦荟冰冰茶-社媒清洗数据.xlsx",
+                "青橘芦荟冰冰茶",
+            )
+            summaries = summarize_social_cleaned_workbook(source)
+
+        by_key = {summary.key: summary for summary in summaries}
+        self.assertEqual([summary.key for summary in summaries], [
+            "dianping",
+            "weibo",
+            "xiaohongshu",
+            "douyin",
+            "bilibili",
+        ])
+        self.assertEqual(by_key["dianping"].positive_tags, (("清爽不腻", 3),))
+        self.assertEqual(by_key["dianping"].negative_tags, (("太甜", 2),))
+        self.assertEqual(
+            (by_key["dianping"].positive_users, by_key["dianping"].negative_users),
+            (4, 2),
+        )
+        self.assertEqual(by_key["weibo"].positive_tags, (("好喝", 1), ("清爽", 1)))
+        self.assertEqual(by_key["weibo"].negative_tags, (("味道怪", 1),))
+        self.assertEqual((by_key["bilibili"].positive_users, by_key["bilibili"].negative_users), (0, 0))
+
+    def test_cleaned_workbook_product_and_archive_filename_follow_new_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = _write_cleaned_social_workbook(
+                Path(temporary) / "input.xlsx", "青橘芦荟冰冰茶"
+            )
+            products = social_cleaned_workbook_products(source)
+        self.assertEqual(
+            products,
+            {normalize_social_product_key("青橘芦荟冰冰茶"): "青橘芦荟冰冰茶"},
+        )
+        self.assertEqual(
+            _social_cleaned_input_filename(
+                "古茗", "青橘芦荟冰冰茶", date(2026, 7, 18)
+            ),
+            "古茗-20260718-青橘芦荟冰冰茶-社媒清洗数据.xlsx",
+        )
 
     def test_workbook_matches_single_product_summary_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -225,7 +422,8 @@ class SocialFeedbackJobTests(unittest.TestCase):
         self.assertEqual(fields["report"]["fieldId"], "amWTton")
         self.assertEqual(fields["report"]["cellType"], "link")
         self.assertEqual(fields["feedback"]["fieldId"], "j8IgB7P")
-        self.assertEqual(fields["bilibili"]["fieldId"], "KfgxCcf")
+        self.assertEqual(fields["socialCleanedRawData"]["fieldId"], "Q4mbLWx")
+        self.assertNotIn("bilibili", fields)
         self.assertNotIn("allData", fields)
 
     def test_local_attachment_url_is_polled_from_ai_table(self) -> None:
@@ -504,15 +702,13 @@ class SocialFeedbackJobTests(unittest.TestCase):
                 "productName": "青芒黄皮冰茶",
                 "launchDate": date(2026, 6, 10),
                 "day30": date(2026, 7, 9),
-                "weibo": [{"url": "https://alidocs.dingtalk.com/i/nodes/weibo"}],
-                "xiaohongshu": None,
-                "douyin": None,
-                "bilibili": [{"url": "https://alidocs.dingtalk.com/i/nodes/bilibili"}],
+                "socialCleanedRawData": [
+                    {"url": "https://alidocs.dingtalk.com/i/nodes/social-cleaned"}
+                ],
             },
         )
         output = Path("/tmp/茉莉奶白-青芒黄皮冰茶-社媒评论统计.xlsx")
-        weibo = Path("/tmp/weibo.xlsx")
-        bilibili = Path("/tmp/bilibili.xlsx")
+        cleaned = Path("/tmp/茉莉奶白-20260709-青芒黄皮冰茶-社媒清洗数据.xlsx")
         product_key = normalize_social_product_key("青芒黄皮冰茶")
         with (
             patch("service.jobs.load_configs", return_value={"dingtalk": {}, "dingtalk_docs": {}}),
@@ -522,18 +718,12 @@ class SocialFeedbackJobTests(unittest.TestCase):
             patch("service.jobs._ensure_social_archive_folder", return_value="folder"),
             patch(
                 "service.jobs._download_social_input_source",
-                side_effect=[weibo, None, None, bilibili],
+                return_value=cleaned,
             ),
             patch(
-                "service.jobs.social_workbook_products",
+                "service.jobs.social_cleaned_workbook_products",
                 return_value={product_key: "青芒黄皮冰茶"},
             ),
-            patch(
-                "service.jobs.split_social_workbook",
-                side_effect=[{product_key: weibo}, {product_key: bilibili}],
-            ),
-            patch("service.jobs._upload_social_input") as upload_input,
-            patch("service.jobs._prepare_social_input", return_value=("folder", None)),
             patch("service.jobs.generate_consumer_feedback_tables", return_value=output) as generate,
             patch("service.jobs.dingtalk_docs.upload_file", return_value="https://docs/result") as upload,
             patch("service.jobs.dingtalk_table.mark_links") as mark_links,
@@ -542,15 +732,8 @@ class SocialFeedbackJobTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         clear.assert_called_once()
-        upload_input.assert_not_called()
         generate.assert_called_once()
-        self.assertEqual(
-            generate.call_args.args[1],
-            {
-                "weibo": Path("/tmp/weibo.xlsx"),
-                "bilibili": Path("/tmp/bilibili.xlsx"),
-            },
-        )
+        self.assertEqual(generate.call_args.args[1], cleaned)
         upload.assert_called_once_with({}, output, "folder")
         mark_links.assert_called_once_with(
             ANY,
@@ -561,22 +744,21 @@ class SocialFeedbackJobTests(unittest.TestCase):
             [item.args[2] for item in feedback.call_args_list],
             [
                 "1/4 正在下载并识别社媒数据",
-                "2/4 正在准备社媒数据",
+                "2/4 正在校验社媒清洗数据",
                 "3/4 正在生成社媒评论统计表",
                 "4/4 正在上传统计表到钉钉文档",
                 "已生成社媒评论统计表",
             ],
         )
 
-    def test_combined_file_is_distributed_and_generates_both_product_reports(self) -> None:
+    def test_cleaned_file_with_multiple_products_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            combined = root / "合并微博.xlsx"
-            workbook = Workbook()
-            workbook.active.append(["品牌", "产品名称", "内容"])
-            workbook.active.append(["霸王茶姬", "糯青山柠檬奶", "A"])
-            workbook.active.append(["霸王茶姬", "雾红尘柠檬奶", "B"])
-            workbook.save(combined)
+            combined = _write_cleaned_social_workbook(
+                root / "霸王茶姬-20260718-糯青山柠檬奶-社媒清洗数据.xlsx",
+                "糯青山柠檬奶",
+                extra_product="雾红尘柠檬奶",
+            )
 
             current = dingtalk_table.TaskRecord(
                 "current",
@@ -585,28 +767,9 @@ class SocialFeedbackJobTests(unittest.TestCase):
                     "productName": "糯青山柠檬奶",
                     "launchDate": date(2026, 6, 18),
                     "day30": date(2026, 7, 18),
-                    "weibo": [{"url": "https://docs/combined"}],
+                    "socialCleanedRawData": [{"url": "https://docs/combined"}],
                 },
             )
-            peer = dingtalk_table.TaskRecord(
-                "peer",
-                {
-                    "brand": {"name": "霸王茶姬"},
-                    "productName": "雾红尘柠檬奶",
-                    "launchDate": date(2026, 6, 20),
-                    "day30": date(2026, 7, 18),
-                    "weibo": [{"url": "https://docs/old-peer"}],
-                },
-            )
-            outputs = {
-                "current": root / "霸王茶姬-糯青山柠檬奶-社媒评论统计.xlsx",
-                "peer": root / "霸王茶姬-雾红尘柠檬奶-社媒评论统计.xlsx",
-            }
-            for output in outputs.values():
-                output.write_bytes(b"report")
-
-            def generate(target_record_id, *_args, **_kwargs):
-                return outputs[target_record_id]
 
             with (
                 patch(
@@ -618,57 +781,27 @@ class SocialFeedbackJobTests(unittest.TestCase):
                     },
                 ),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=current),
-                patch("service.jobs.dingtalk_table.fetch_records", return_value=[current, peer]),
                 patch("service.jobs._ensure_social_archive_folder", return_value="folder"),
                 patch(
                     "service.jobs._download_social_input_source",
-                    side_effect=[combined, None, None, None],
+                    return_value=combined,
                 ),
-                patch("service.jobs._upload_social_input") as upload_input,
-                patch("service.jobs._prepare_social_input", return_value=("folder", None)),
-                patch("service.jobs.dingtalk_table.clear_link_fields"),
-                patch("service.jobs.dingtalk_table.update_feedback") as feedback,
-                patch("service.jobs.generate_consumer_feedback_tables", side_effect=generate) as generate_tables,
-                patch(
-                    "service.jobs.dingtalk_docs.upload_file",
-                    side_effect=["https://docs/report-current", "https://docs/report-peer"],
-                ),
-                patch("service.jobs.dingtalk_table.mark_links") as mark_links,
+                patch("service.jobs.dingtalk_table.update_feedback"),
+                patch("service.jobs.dingtalk_table.mark_failed"),
+                patch("service.jobs.generate_consumer_feedback_tables") as generate_tables,
             ):
-                result = run_generate_consumer_feedback_tables("current")
+                with self.assertRaisesRegex(RuntimeError, "不属于当前新品"):
+                    run_generate_consumer_feedback_tables("current")
 
-            self.assertTrue(result["ok"])
-            self.assertEqual(set(result["results"]), {"current", "peer"})
-            upload_input.assert_not_called()
-            self.assertEqual(
-                [item.kwargs["product"] for item in generate_tables.call_args_list],
-                ["糯青山柠檬奶", "雾红尘柠檬奶"],
-            )
-            self.assertEqual(
-                [item.args[1] for item in mark_links.call_args_list],
-                ["current", "peer"],
-            )
-            progress_by_record: dict[str, list[str]] = {}
-            for item in feedback.call_args_list:
-                progress_by_record.setdefault(item.args[1], []).append(item.args[2])
-            expected_progress = [
-                "1/4 正在下载并识别社媒数据",
-                "2/4 正在按产品拆分社媒数据",
-                "3/4 正在生成社媒评论统计表",
-                "4/4 正在上传统计表到钉钉文档",
-                "已生成社媒评论统计表",
-            ]
-            self.assertEqual(progress_by_record["current"], expected_progress)
-            self.assertEqual(progress_by_record["peer"], expected_progress)
+            generate_tables.assert_not_called()
 
     def test_unknown_product_stops_before_any_attachment_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            combined = Path(temporary) / "未知产品.xlsx"
-            workbook = Workbook()
-            workbook.active.append(["产品名称", "内容"])
-            workbook.active.append(["糯青山柠檬奶", "A"])
-            workbook.active.append(["不存在的产品", "B"])
-            workbook.save(combined)
+            combined = _write_cleaned_social_workbook(
+                Path(temporary) / "未知产品.xlsx",
+                "糯青山柠檬奶",
+                extra_product="不存在的产品",
+            )
             current = dingtalk_table.TaskRecord(
                 "current",
                 {
@@ -676,7 +809,7 @@ class SocialFeedbackJobTests(unittest.TestCase):
                     "productName": "糯青山柠檬奶",
                     "launchDate": date(2026, 6, 18),
                     "day30": date(2026, 7, 18),
-                    "weibo": [{"url": "https://docs/combined"}],
+                    "socialCleanedRawData": [{"url": "https://docs/combined"}],
                 },
             )
             configs = {
@@ -687,20 +820,19 @@ class SocialFeedbackJobTests(unittest.TestCase):
             with (
                 patch("service.jobs.load_configs", return_value=configs),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=current),
-                patch("service.jobs.dingtalk_table.fetch_records", return_value=[current]),
                 patch("service.jobs._ensure_social_archive_folder", return_value="folder"),
                 patch(
                     "service.jobs._download_social_input_source",
-                    side_effect=[combined, None, None, None],
+                    return_value=combined,
                 ),
-                patch("service.jobs._upload_social_input") as upload_input,
                 patch("service.jobs.dingtalk_table.update_feedback"),
                 patch("service.jobs.dingtalk_table.mark_failed"),
+                patch("service.jobs.generate_consumer_feedback_tables") as generate,
             ):
-                with self.assertRaisesRegex(RuntimeError, "无法匹配"):
+                with self.assertRaisesRegex(RuntimeError, "不属于当前新品"):
                     run_generate_consumer_feedback_tables("current")
 
-            upload_input.assert_not_called()
+            generate.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -16,8 +16,9 @@ ATTACHMENT_KEYS = {
     "xiaohongshu",
     "douyin",
     "bilibili",
+    "socialCleanedRawData",
 }
-LINK_KEYS = {"meituanData", "elemeData", "jdData", "report"}
+LINK_KEYS = {"meituanData", "elemeData", "jdData", "report", "folder"}
 ATTACHMENT_CLEAR_ATTEMPTS = 5
 ATTACHMENT_CLEAR_DELAY_SECONDS = 0.5
 

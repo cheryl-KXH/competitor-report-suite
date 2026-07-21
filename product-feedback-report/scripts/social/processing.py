@@ -12,14 +12,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.page import PageMargins
 
 
-SOCIAL_PLATFORMS = (
+SOCIAL_RAW_PLATFORMS = (
     ("weibo", "微博"),
     ("xiaohongshu", "小红书"),
     ("douyin", "抖音"),
     ("bilibili", "B站"),
 )
-
-
 @dataclass(frozen=True)
 class PlatformSummary:
     key: str
@@ -80,6 +78,43 @@ def social_workbook_products(path: Path) -> dict[str, str]:
         workbook.close()
 
 
+def social_cleaned_workbook_products(path: Path) -> dict[str, str]:
+    """Return products found across the four raw-data sheets in a cleaned workbook."""
+    workbook = load_workbook(path, read_only=True, data_only=False)
+    try:
+        products: dict[str, str] = {}
+        missing_sheets = [label for _, label in SOCIAL_RAW_PLATFORMS if label not in workbook.sheetnames]
+        if missing_sheets:
+            raise RuntimeError(
+                f"社媒清洗数据缺少工作表：{'、'.join(missing_sheets)}（文件：{path.name}）"
+            )
+        for _, label in SOCIAL_RAW_PLATFORMS:
+            worksheet = workbook[label]
+            header = [cell.value for cell in worksheet[1]]
+            product_index = _header_index(header, "产品名称")
+            if product_index is None:
+                raise RuntimeError(
+                    f"社媒清洗数据的“{label}”工作表缺少“产品名称”列：{path.name}"
+                )
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=2, values_only=True), start=2
+            ):
+                if not any(_text(value) for value in row):
+                    continue
+                raw_product = row[product_index] if product_index < len(row) else None
+                product = _text(raw_product)
+                product_key = normalize_social_product_key(product)
+                if not product_key:
+                    raise RuntimeError(
+                        f"社媒清洗数据的“{label}”工作表第 {row_number} 行"
+                        f"“产品名称”为空：{path.name}"
+                    )
+                products.setdefault(product_key, product)
+        return products
+    finally:
+        workbook.close()
+
+
 def split_social_workbook(
     path: Path,
     *,
@@ -134,18 +169,13 @@ def summarize_social_rows(key: str, label: str, rows: Iterable[Iterable[Any]]) -
     if sentiment_index is None:
         raise RuntimeError(f"{label}数据缺少“情感识别”列。")
 
-    label_columns: list[tuple[int, int]] = []
+    label_columns: list[int] = []
     normalized = [_text(value).replace(" ", "") for value in header]
     for index, column_name in enumerate(normalized):
-        match = re.fullmatch(r"评价(\d+)-好/差评", column_name)
-        if not match:
-            continue
-        tag_name = f"评价{match.group(1)}-对应标签"
-        tag_index = next((i for i, value in enumerate(normalized) if value == tag_name), None)
-        if tag_index is not None:
-            label_columns.append((index, tag_index))
+        if re.fullmatch(r"评价\d+-对应标签", column_name):
+            label_columns.append(index)
     if not label_columns:
-        raise RuntimeError(f"{label}数据缺少“评价n-好/差评”和对应标签列。")
+        raise RuntimeError(f"{label}数据缺少“评价n-对应标签”列。")
 
     positive_tags: Counter[str] = Counter()
     negative_tags: Counter[str] = Counter()
@@ -157,14 +187,13 @@ def summarize_social_rows(key: str, label: str, rows: Iterable[Iterable[Any]]) -
             positive_users += 1
         elif sentiment == "负向":
             negative_users += 1
-        for polarity_index, tag_index in label_columns:
-            polarity = _text(row[polarity_index] if polarity_index < len(row) else "")
+        for tag_index in label_columns:
             tag = _text(row[tag_index] if tag_index < len(row) else "")
             if not tag:
                 continue
-            if polarity in {"好评", "正向"}:
+            if sentiment == "正向":
                 positive_tags[tag] += 1
-            elif polarity in {"差评", "负向"}:
+            elif sentiment == "负向":
                 negative_tags[tag] += 1
 
     sort_tags = lambda counter: tuple(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
@@ -183,6 +212,117 @@ def summarize_social_file(key: str, label: str, path: Path) -> PlatformSummary:
     try:
         worksheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
         return summarize_social_rows(key, label, worksheet.iter_rows(values_only=True))
+    finally:
+        workbook.close()
+
+
+def _count_value(value: Any, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise RuntimeError(f"{label}不是有效整数：{value}")
+    if isinstance(value, (int, float)) and float(value).is_integer():
+        return int(value)
+    text = _text(value).replace(",", "")
+    try:
+        parsed = float(text)
+    except ValueError as exc:
+        raise RuntimeError(f"{label}不是有效整数：{value}") from exc
+    if not parsed.is_integer():
+        raise RuntimeError(f"{label}不是有效整数：{value}")
+    return int(parsed)
+
+
+def summarize_dianping_rows(rows: Iterable[Iterable[Any]]) -> PlatformSummary:
+    values = [list(row) for row in rows]
+    header_row = None
+    indexes: tuple[int, int, int, int] | None = None
+    for row_number, row in enumerate(values):
+        normalized = [_text(value).replace(" ", "") for value in row]
+        try:
+            positive_index = normalized.index("大众点评好评")
+            negative_index = normalized.index("大众点评差评")
+        except ValueError:
+            continue
+        positive_count_index = next(
+            (index for index in range(positive_index + 1, len(normalized)) if normalized[index] == "评论数"),
+            None,
+        )
+        negative_count_index = next(
+            (index for index in range(negative_index + 1, len(normalized)) if normalized[index] == "评论数"),
+            None,
+        )
+        if positive_count_index is not None and negative_count_index is not None:
+            header_row = row_number
+            indexes = (
+                positive_index,
+                positive_count_index,
+                negative_index,
+                negative_count_index,
+            )
+            break
+    if header_row is None or indexes is None:
+        raise RuntimeError("大众点评工作表缺少统计表头。")
+
+    positive_tags: Counter[str] = Counter()
+    negative_tags: Counter[str] = Counter()
+    positive_users: int | None = None
+    negative_users: int | None = None
+    positive_index, positive_count_index, negative_index, negative_count_index = indexes
+    for row in values[header_row + 1 :]:
+        padded = row + [None] * max(0, negative_count_index + 1 - len(row))
+        positive_label = _text(padded[positive_index])
+        negative_label = _text(padded[negative_index])
+        if positive_label == "好评用户数" and negative_label == "差评用户数":
+            positive_users = _count_value(
+                padded[positive_count_index], label="大众点评好评用户数"
+            )
+            negative_users = _count_value(
+                padded[negative_count_index], label="大众点评差评用户数"
+            )
+            break
+        if positive_label and positive_label != "/":
+            positive_tags[positive_label] += _count_value(
+                padded[positive_count_index], label=f"大众点评好评标签“{positive_label}”评论数"
+            )
+        if negative_label and negative_label != "/":
+            negative_tags[negative_label] += _count_value(
+                padded[negative_count_index], label=f"大众点评差评标签“{negative_label}”评论数"
+            )
+    if positive_users is None or negative_users is None:
+        raise RuntimeError("大众点评工作表缺少“好评用户数/差评用户数”汇总行。")
+
+    sort_tags = lambda counter: tuple(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
+    return PlatformSummary(
+        "dianping",
+        "大众点评",
+        sort_tags(positive_tags),
+        sort_tags(negative_tags),
+        positive_users,
+        negative_users,
+    )
+
+
+def summarize_social_cleaned_workbook(path: Path) -> list[PlatformSummary]:
+    """Read the prepared Dianping table and four raw-platform sheets from one workbook."""
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        required_sheets = ["大众点评", *(label for _, label in SOCIAL_RAW_PLATFORMS)]
+        missing_sheets = [name for name in required_sheets if name not in workbook.sheetnames]
+        if missing_sheets:
+            raise RuntimeError(
+                f"社媒清洗数据缺少工作表：{'、'.join(missing_sheets)}（文件：{path.name}）"
+            )
+        summaries = [
+            summarize_dianping_rows(workbook["大众点评"].iter_rows(values_only=True))
+        ]
+        summaries.extend(
+            summarize_social_rows(
+                key,
+                label,
+                workbook[label].iter_rows(values_only=True),
+            )
+            for key, label in SOCIAL_RAW_PLATFORMS
+        )
+        return summaries
     finally:
         workbook.close()
 

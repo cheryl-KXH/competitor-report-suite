@@ -87,6 +87,12 @@
       "cellType": "link",
       "required": false
     },
+    "folder": {
+      "label": "所在文件夹",
+      "fieldId": "rLvqTaJ",
+      "cellType": "link",
+      "required": false
+    },
     "status": {
       "label": "状态",
       "fieldId": "",
