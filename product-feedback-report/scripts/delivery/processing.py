@@ -10,15 +10,17 @@ from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
 
 DELIVERY_HEADERS = ["平台", "品牌", "店铺名称", "分类描述", "宝贝名称", "原价", "现价", "宝贝月销", "抓取日期"]
-RECENT_LAUNCH_DAYS = 32
+RECENT_LAUNCH_DAYS = 30
 SALES_WINDOW_DAYS = 30
-RECENT_LAUNCH_HEADER = "近32日上新日期"
-LEGACY_RECENT_LAUNCH_HEADER = "近30日上新日期"
+FUTURE_LAUNCH_TOLERANCE_DAYS = 2
+RECENT_LAUNCH_HEADER = "近30日上新日期"
 ANNOTATION_HEADERS = ["平台", "品牌", "产品", RECENT_LAUNCH_HEADER]
+MANUAL_AVAILABILITY_STATUSES = ("提前下架", "外卖无售")
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class AnnotationRow:
     brand: str
     product: str
     recent_launch_date: date | None
+    manual_status: str | None = None
 
 
 def ensure_dir(path: Path) -> Path:
@@ -75,6 +78,11 @@ def format_chinese_date(value: date | None) -> str:
 
 def normalize_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def normalize_product_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", normalize_text(value)).casefold()
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", text)
 
 
 def normalize_bool(value: Any) -> bool:
@@ -191,6 +199,20 @@ def write_product_menu(rows: list[RawSaleRow], output_path: Path, recent_launch_
     ws.append(ANNOTATION_HEADERS)
     for platform, brand, product in unique:
         ws.append([platform, brand, product, format_chinese_date(recent_launch_dates.get((brand, product)))])
+    manual_status_validation = DataValidation(
+        type="list",
+        formula1=f'"{",".join(MANUAL_AVAILABILITY_STATUSES)}"',
+        allow_blank=True,
+    )
+    manual_status_validation.promptTitle = "人工状态标注"
+    manual_status_validation.prompt = (
+        "本列可人工增加上新日期标注；关注产品无数据时，请在各平台新增一行填入产品名称并标注"
+        "“提前下架”或“外卖无售”"
+    )
+    manual_status_validation.showInputMessage = True
+    manual_status_validation.showErrorMessage = False
+    ws.add_data_validation(manual_status_validation)
+    manual_status_validation.add(f"D2:D1048576")
     return save_workbook(wb, output_path)
 
 
@@ -199,8 +221,6 @@ def read_annotation(path: Path) -> list[AnnotationRow]:
     ws = wb.active
     header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
     mapping = find_header_map(header, ANNOTATION_HEADERS)
-    if RECENT_LAUNCH_HEADER not in mapping and LEGACY_RECENT_LAUNCH_HEADER in [normalize_text(cell) for cell in header]:
-        mapping[RECENT_LAUNCH_HEADER] = [normalize_text(cell) for cell in header].index(LEGACY_RECENT_LAUNCH_HEADER)
     required = {"平台", "品牌", "产品", RECENT_LAUNCH_HEADER}
     missing = required - set(mapping)
     if missing:
@@ -210,15 +230,51 @@ def read_annotation(path: Path) -> list[AnnotationRow]:
         product = normalize_text(row[mapping["产品"]])
         if not product:
             continue
+        annotation_value = row[mapping[RECENT_LAUNCH_HEADER]]
+        annotation_text = normalize_text(annotation_value)
+        launch_date = parse_date(annotation_value)
+        manual_status = (
+            annotation_text
+            if annotation_text in MANUAL_AVAILABILITY_STATUSES
+            else None
+        )
+        if annotation_text and launch_date is None and manual_status is None:
+            allowed = "、".join(MANUAL_AVAILABILITY_STATUSES)
+            raise RuntimeError(
+                f"产品“{product}”的日期标注“{annotation_text}”无效；"
+                f"请填写日期或人工标注：{allowed}。"
+            )
         rows.append(
             AnnotationRow(
                 platform=normalize_text(row[mapping["平台"]]),
                 brand=normalize_text(row[mapping["品牌"]]),
                 product=product,
-                recent_launch_date=parse_date(row[mapping[RECENT_LAUNCH_HEADER]]),
+                recent_launch_date=launch_date,
+                manual_status=manual_status,
             )
         )
     return rows
+
+
+def tracked_product_statuses(
+    rows: list[AnnotationRow], brand: str, products: list[str]
+) -> dict[str, str]:
+    requested = {normalize_product_key(product): product for product in products}
+    statuses: dict[str, str] = {}
+    for row in rows:
+        if not row.manual_status or (row.brand and row.brand != brand):
+            continue
+        key = normalize_product_key(row.product)
+        product = requested.get(key)
+        if not product:
+            continue
+        previous = statuses.get(product)
+        if previous and previous != row.manual_status:
+            raise RuntimeError(
+                f"关注新品“{product}”同时标注了“{previous}”和“{row.manual_status}”。"
+            )
+        statuses[product] = row.manual_status
+    return statuses
 
 
 def _annotation_lookup(rows: list[AnnotationRow]) -> dict[tuple[str, str, str], AnnotationRow]:
@@ -258,13 +314,27 @@ def _store_sale_days(row: RawSaleRow, lookup: dict[tuple[str, str, str], Annotat
     launch_date = annotation.recent_launch_date if annotation else None
     if launch_date is None:
         return SALES_WINDOW_DAYS
-    difference = (row.crawl_date - launch_date).days
-    if difference < 0:
+    return _sale_days_from_dates(
+        platform, row.brand, row.product, row.crawl_date, launch_date
+    )
+
+
+def _sale_days_from_dates(
+    platform: str,
+    brand: str,
+    product: str,
+    crawl_date: date,
+    launch_date: date,
+) -> int:
+    difference = (crawl_date - launch_date).days
+    if difference < -FUTURE_LAUNCH_TOLERANCE_DAYS:
         raise RuntimeError(
-            "上架日期晚于抓取日期："
-            f"平台={platform}，品牌={row.brand}，产品={row.product}，"
-            f"上架日期={launch_date:%Y-%m-%d}，抓取日期={row.crawl_date:%Y-%m-%d}"
+            f"上架日期晚于抓取日期超过{FUTURE_LAUNCH_TOLERANCE_DAYS}天："
+            f"平台={platform}，品牌={brand}，产品={product}，"
+            f"上架日期={launch_date:%Y-%m-%d}，抓取日期={crawl_date:%Y-%m-%d}"
         )
+    if difference < 0:
+        return difference
     return min(difference + 1, SALES_WINDOW_DAYS)
 
 
@@ -277,14 +347,7 @@ def _product_sale_days(
 ) -> int:
     if launch_date is None:
         return SALES_WINDOW_DAYS
-    difference = (crawl_date - launch_date).days
-    if difference < 0:
-        raise RuntimeError(
-            "上架日期晚于抓取日期："
-            f"平台={platform}，品牌={brand}，产品={product}，"
-            f"上架日期={launch_date:%Y-%m-%d}，抓取日期={crawl_date:%Y-%m-%d}"
-        )
-    return min(difference + 1, SALES_WINDOW_DAYS)
+    return _sale_days_from_dates(platform, brand, product, crawl_date, launch_date)
 
 
 def platform_delivery_metrics(
@@ -321,7 +384,9 @@ def platform_delivery_metrics(
                     launch_date,
                 ),
                 "launch_date": launch_date,
-                "daily_store_avg": data["sales"] / data["sale_days"],
+                "daily_store_avg": (
+                    data["sales"] / data["sale_days"] if data["sale_days"] else 0.0
+                ),
             }
         )
     return metrics

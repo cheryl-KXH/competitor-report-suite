@@ -19,8 +19,8 @@ from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[2]
 SUITE_ROOT = ROOT.parent.resolve()
-GENERIC_POSITIVE_TAGS = {"好喝喜欢推荐", "喜欢推荐", "好评"}
-GENERIC_NEGATIVE_TAGS = {"难喝不喜欢不推荐", "不喜欢不推荐", "差评"}
+GENERIC_POSITIVE_TAGS = {"好喝，喜欢，推荐"}
+GENERIC_NEGATIVE_TAGS = {"难喝，不喜欢，不推荐"}
 
 
 @dataclass(frozen=True)
@@ -81,6 +81,14 @@ class SocialSection:
     positive_users: int
     negative_users: int
 
+    @property
+    def positive_count(self) -> int:
+        return sum(count for _, count in self.positive_tags)
+
+    @property
+    def negative_count(self) -> int:
+        return sum(count for _, count in self.negative_tags)
+
 
 @dataclass(frozen=True)
 class SocialReport:
@@ -97,6 +105,18 @@ class SocialReport:
         return self.positive_users + self.negative_users
 
     @property
+    def positive_count(self) -> int:
+        return sum(section.positive_count for section in self.sections)
+
+    @property
+    def negative_count(self) -> int:
+        return sum(section.negative_count for section in self.sections)
+
+    @property
+    def total_count(self) -> int:
+        return self.positive_count + self.negative_count
+
+    @property
     def positive_rate(self) -> float:
         return self.positive_users / self.total_users if self.total_users else 0.0
 
@@ -105,6 +125,7 @@ class SocialReport:
 class ReportBuildResult:
     path: Path
     warnings: tuple[str, ...]
+    pdf_path: Path | None = None
 
 
 def _text(value: Any) -> str:
@@ -664,13 +685,13 @@ def _social_summary_html(social: SocialReport | None) -> str:
     if not social:
         return '<p class="missing-note">消费者反馈统计暂无法获取。</p>'
     period = f"（{_escape(social.period)}）" if social.period else ""
-    if not social.total_users:
+    if not social.total_count:
         return f'<p>上市30日{period}暂未获取到有效第三方评论。</p>'
     return (
-        f'<p class="social-summary">上市30日{period}第三方评论共 {_format_count(social.total_users)} 条，'
+        f'<p class="social-summary">上市30日{period}第三方评论共 {_format_count(social.total_count)} 条，'
         f'好评率为 {_format_positive_rate(social.positive_rate)}：<br>'
-        f'好评（{_format_count(social.positive_users)} 条）主要提及关键词：{_escape(_top_labels(social.positive_top))}；<br>'
-        f'差评（{_format_count(social.negative_users)} 条）主要提及关键词：{_escape(_top_labels(social.negative_top))}。</p>'
+        f'好评（{_format_count(social.positive_count)} 条）主要提及关键词：{_escape(_top_labels(social.positive_top))}；<br>'
+        f'差评（{_format_count(social.negative_count)} 条）主要提及关键词：{_escape(_top_labels(social.negative_top))}。</p>'
     )
 
 
@@ -679,12 +700,23 @@ def _social_detail_html(social: SocialReport | None) -> str:
         return '<p class="missing-note">消费者反馈详情暂无法获取。</p>'
 
     total_value = _format_count(social.total_users) if social.total_users else ""
-    positive_value = _format_count(social.positive_users) if social.positive_users else ""
-    negative_value = _format_count(social.negative_users) if social.negative_users else ""
+    positive_user_value = _format_count(social.positive_users) if social.positive_users else ""
+    negative_user_value = _format_count(social.negative_users) if social.negative_users else ""
     rate_value = _format_positive_rate(social.positive_rate) if social.total_users else ""
-    section_rows: list[str] = []
+    detail_rows: list[str] = []
+    colgroup = (
+        '<colgroup><col class="positive-text"><col class="positive-count"><col class="negative-text">'
+        '<col class="negative-count"><col class="kpi-label-column"><col class="kpi-value-column"></colgroup>'
+    )
 
     for section_index, section in enumerate(social.sections):
+        section_rows: list[str] = []
+        if section_index == 0:
+            section_rows.append(
+                f'<tr class="feedback-title-row"><th class="feedback-title-cell" colspan="4">'
+                f'{_escape(social.title)}</th><th class="kpi-label">好评率</th>'
+                f'<td class="kpi-value">{rate_value}</td></tr>'
+            )
         kpi_cells = (
             f'<th class="kpi-label">总计</th><td class="kpi-value">{total_value}</td>'
             if section_index == 0
@@ -713,11 +745,11 @@ def _social_detail_html(social: SocialReport | None) -> str:
 
             if section_index == 0 and index == 0:
                 detail_kpi_cells = (
-                    f'<th class="kpi-label">好评用户数</th><td class="kpi-value">{positive_value}</td>'
+                    f'<th class="kpi-label">好评用户数</th><td class="kpi-value">{positive_user_value}</td>'
                 )
             elif section_index == 0 and index == 1:
                 detail_kpi_cells = (
-                    f'<th class="kpi-label">差评用户数</th><td class="kpi-value">{negative_value}</td>'
+                    f'<th class="kpi-label">差评用户数</th><td class="kpi-value">{negative_user_value}</td>'
                 )
             else:
                 detail_kpi_cells = '<td class="kpi-spacer" colspan="2"></td>'
@@ -729,26 +761,27 @@ def _social_detail_html(social: SocialReport | None) -> str:
             f'<th>差评用户数</th><td>{section.negative_users}</td>'
             '<td class="kpi-spacer" colspan="2"></td></tr>'
         )
+        detail_rows.extend(section_rows)
 
     if not social.sections:
-        section_rows.extend(
-            [
+        section_rows = [
+            f'<tr class="feedback-title-row"><th class="feedback-title-cell" colspan="4">'
+            f'{_escape(social.title)}</th><th class="kpi-label">好评率</th>'
+            f'<td class="kpi-value">{rate_value}</td></tr>',
                 f'<tr><td colspan="4" class="empty-platform"></td>'
                 f'<th class="kpi-label">总计</th><td class="kpi-value">{total_value}</td></tr>',
                 f'<tr><td colspan="4" class="empty-platform"></td>'
-                f'<th class="kpi-label">好评用户数</th><td class="kpi-value">{positive_value}</td></tr>',
+                f'<th class="kpi-label">好评用户数</th><td class="kpi-value">{positive_user_value}</td></tr>',
                 f'<tr><td colspan="4" class="empty-platform"></td>'
-                f'<th class="kpi-label">差评用户数</th><td class="kpi-value">{negative_value}</td></tr>',
-            ]
-        )
+                f'<th class="kpi-label">差评用户数</th><td class="kpi-value">{negative_user_value}</td></tr>',
+        ]
+        detail_rows.extend(section_rows)
 
-    return f"""
-<div class="table-scroll"><table class="feedback-table">
-<colgroup><col class="positive-text"><col class="positive-count"><col class="negative-text">
-<col class="negative-count"><col class="kpi-label-column"><col class="kpi-value-column"></colgroup>
-<tbody><tr class="feedback-title-row"><th class="feedback-title-cell" colspan="4">{_escape(social.title)}</th>
-<th class="kpi-label">好评率</th><td class="kpi-value">{rate_value}</td></tr>{''.join(section_rows)}</tbody></table></div>
-"""
+    return (
+        '<div class="table-scroll feedback-detail-table-wrap">'
+        f'<table class="feedback-table feedback-detail-table">{colgroup}'
+        f'<tbody>{"".join(detail_rows)}</tbody></table></div>'
+    )
 
 
 def _mobile_zoom_script(page_width: int) -> str:
@@ -879,8 +912,10 @@ def build_report_html(
     delivery_report: DeliveryReport | None = None,
     jd_report: tuple[tuple[JdSale, ...], float] | None = None,
     social_report_models: dict[str, SocialReport] | None = None,
+    delivery_statuses: dict[str, str] | None = None,
 ) -> ReportBuildResult:
     warnings: list[str] = []
+    delivery_statuses = delivery_statuses or {}
     if delivery_report is None:
         if not meituan_path or not eleme_path:
             raise RuntimeError("生成报告缺少美团或饿了么数据。")
@@ -925,11 +960,14 @@ def build_report_html(
                 warnings.append(f"{product}：产品外观图片下载失败（{exc}）")
         price_suffix = f"（{_price_html(info.price)}）" if info and info.price else ""
         product_sections.append(
-            f'<section class="product-section"><h2 class="product-title"><span aria-hidden="true">●</span>'
+            f'<section class="product-section"><div class="pdf-keep-together product-info-module">'
+            f'<h2 class="product-title"><span aria-hidden="true">●</span>'
             f'<span class="product-title-text">{_escape(product)}{price_suffix}</span></h2>'
-            f'<h3>1. 产品信息</h3>{_product_info_html(product, info, image_uri)}'
-            f'<h3>2. 新品消费者反馈汇总</h3>{_social_summary_html(social)}'
-            f'<h3>3. 消费者反馈详情</h3>{_social_detail_html(social)}</section>'
+            f'<h3>1. 产品信息</h3>{_product_info_html(product, info, image_uri)}</div>'
+            f'<div class="pdf-keep-together feedback-summary-module">'
+            f'<h3>2. 新品消费者反馈汇总</h3>{_social_summary_html(social)}</div>'
+            f'<h3 class="feedback-detail-heading">3. 消费者反馈详情</h3>'
+            f'{_social_detail_html(social)}</section>'
         )
 
     launch_values = [value for value in launch_dates.values() if value]
@@ -938,6 +976,12 @@ def build_report_html(
         launch_text = f"{launch_values[0].month}.{launch_values[0].day} "
     intro_rows: list[str] = []
     for product in products:
+        delivery_status = delivery_statuses.get(product)
+        if delivery_status:
+            intro_rows.append(
+                f'<li><strong>{_escape(product)}</strong>：{_escape(delivery_status)}，暂无月销数据。</li>'
+            )
+            continue
         sale = delivery.tracked_rows.get(product)
         if sale:
             intro_rows.append(
@@ -952,6 +996,8 @@ def build_report_html(
     title_text = f"{brand}：{'、'.join(products)}"
     document_title = title_text or title
     page_width = int(page.get("widthPx", 794))
+    border_width = tables.get("borderWidthPx", 0.5)
+    detail_line_height = tables.get("detailLineHeightPx", tables.get("lineHeightPx", 20))
     mobile_zoom_script = _mobile_zoom_script(page_width)
     css = f"""
 {font_css}
@@ -969,7 +1015,7 @@ p{{margin:0}}.lead{{margin-bottom:10px}}.social-summary{{margin:0}}.sales-summar
 .sales-summary li{{margin:2px 0}}.table-scroll{{width:100%;overflow:visible}}
 table{{border-collapse:collapse;table-layout:fixed;width:100%;margin:8px auto 12px;font-size:{tables.get('fontSizePx',13.33)}px;line-height:{tables.get('lineHeightPx',20)}px}}
 caption{{font-weight:700;font-size:{tables.get('fontSizePx',13.33)}px;line-height:{tables.get('lineHeightPx',20)}px;text-align:center;margin:8px 0 5px}}
-th,td{{border:{tables.get('borderWidthPx',0.5)}px solid #{colors.get('black','000000')};padding:{tables.get('cellPaddingVerticalPx',0)}px {tables.get('cellPaddingHorizontalPx',6)}px;text-align:center;vertical-align:middle;word-break:normal;overflow-wrap:normal}}
+th,td{{border:{border_width}px solid #{colors.get('black','000000')};padding:{tables.get('cellPaddingVerticalPx',0)}px {tables.get('cellPaddingHorizontalPx',6)}px;text-align:center;vertical-align:middle;word-break:normal;overflow-wrap:normal}}
 thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colors.get('headerFill','D9D9D9')};font-weight:700}}
 .tracked-row td{{background:#{colors.get('trackedFill','FCE4D6')}}}.total-row>*{{font-weight:700;background:#{colors.get('headerFill','D9D9D9')}}}
 .sales-table .product-column{{width:36%}}.sales-table .platform-column,.sales-table .combined-column,.sales-table .share-column{{width:14.5%}}.sales-table .rank-column{{width:6%}}
@@ -989,16 +1035,18 @@ thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colo
 .feedback-table .count-header{{white-space:nowrap;word-break:keep-all;overflow-wrap:normal;padding-left:2px;padding-right:2px}}
 .feedback-table .kpi-label,.feedback-table .kpi-value{{background:#{colors.get('white','FFFFFF')}}}.feedback-table .kpi-spacer{{border:0;background:transparent}}
 .platform-total th,.platform-total td{{font-weight:700}} .product-info,.feedback-title-row{{break-inside:avoid}}
+.feedback-detail-table-wrap{{width:100%;margin-top:8px}}.feedback-detail-table{{margin:0 auto;line-height:{detail_line_height}px}}
 @media(max-width:767px){{html,body{{width:100%;min-width:0;overflow-x:hidden;background:#{page.get('background','FFFFFF')}}}body{{min-height:100%;-webkit-overflow-scrolling:touch}}.report-viewport{{width:100vw;margin:0;overflow:hidden;touch-action:pan-y pinch-zoom}}.report-scale{{margin:0;will-change:transform}}.report{{margin:0;box-shadow:none}}th,td{{border-width:1.5px}}}}
-@media print{{@page{{size:A4 portrait;margin:10mm}}html,body{{width:auto!important;min-width:0;background:#fff}}.report-viewport,.report-scale{{width:auto!important;max-width:none!important;margin:0;transform:none!important}}.report{{width:auto!important;max-width:none!important;min-height:0;margin:0;padding:0;box-shadow:none}}.table-scroll{{width:100%;overflow:visible}}table{{width:100%!important;max-width:100%}}thead{{display:table-header-group}}tr{{break-inside:avoid}}}}
+@media print{{@page{{size:A4 portrait;margin:10mm}}html,body{{width:auto!important;min-width:0;background:#fff}}.report-viewport,.report-scale{{width:auto!important;max-width:none!important;height:auto!important;overflow:visible!important;margin:0;transform:none!important}}.report{{width:auto!important;max-width:none!important;min-height:0;margin:0;padding:0;box-shadow:none}}.pdf-keep-together{{break-inside:avoid-page!important;page-break-inside:avoid!important}}.feedback-detail-heading{{break-after:avoid-page;page-break-after:avoid}}.feedback-detail-table-wrap,.feedback-detail-table{{break-inside:auto!important;page-break-inside:auto!important}}.feedback-table .feedback-title-row{{break-after:avoid-page;page-break-after:avoid}}.table-scroll{{width:100%;overflow:visible}}table{{width:100%!important;max-width:100%}}.table-scroll>table,.product-info{{width:calc(100% - 1px)!important;max-width:calc(100% - 1px)!important;margin-left:0;margin-right:1px}}thead{{display:table-header-group}}tr{{break-inside:avoid}}}}
 """
     document = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes">
 <title>{_escape(document_title)}</title><style>{css}</style></head>
 <body><div class="report-viewport"><div class="report-scale"><main class="report">{logo_html}<h1>{_escape(title_text)}</h1>
-<p class="lead"><strong>以下是{_escape(brand)} {launch_text}新品30日销量表现及消费者评论情况：</strong></p>
-<ul class="sales-summary">{''.join(intro_rows)}</ul>
-{_delivery_html(brand, delivery)}{_jd_html(brand, jd_rows, jd_total, products)}{''.join(product_sections)}
+<div class="pdf-keep-together report-intro-module"><p class="lead"><strong>以下是{_escape(brand)} {launch_text}新品30日销量表现及消费者评论情况：</strong></p>
+<ul class="sales-summary">{''.join(intro_rows)}</ul></div>
+<div class="pdf-keep-together sales-module">{_delivery_html(brand, delivery)}</div>
+<div class="pdf-keep-together jd-module">{_jd_html(brand, jd_rows, jd_total, products)}</div>{''.join(product_sections)}
 </main></div></div>{mobile_zoom_script}</body></html>"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")

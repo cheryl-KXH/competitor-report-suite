@@ -155,6 +155,21 @@ def _node_name(node: dict[str, Any]) -> str:
     return _node_id(node)
 
 
+def _is_folder_node(node: dict[str, Any]) -> bool:
+    node_type = str(
+        node.get("nodeType")
+        or node.get("type")
+        or node.get("documentType")
+        or ""
+    ).strip().lower()
+    extension = str(node.get("extension") or "").strip().lower().lstrip(".")
+    return (
+        node_type in {"folder", "directory"}
+        or extension in {"folder", "directory"}
+        or node.get("isFolder") is True
+    )
+
+
 def _node_url(node: dict[str, Any]) -> str:
     for key in ("docUrl", "url", "nodeUrl", "resourceUrl", "webUrl"):
         value = node.get(key)
@@ -335,7 +350,7 @@ def list_root_nodes(config: dict[str, Any]) -> list[dict[str, Any]]:
 def find_child_by_name(config: dict[str, Any], parent_id: str | None, name: str) -> dict[str, Any] | None:
     nodes = list_nodes(config, parent_id) if parent_id else list_root_nodes(config)
     for node in nodes:
-        if _node_name(node) == name:
+        if _node_name(node) == name and _is_folder_node(node):
             return node
     return None
 
@@ -380,7 +395,11 @@ def local_upload_root_folder_id(config: dict[str, Any]) -> str:
     ).strip()
     if not name:
         raise RuntimeError("本地上传归档根目录名称不能为空。")
-    matches = [node for node in list_root_nodes(config) if _node_name(node) == name]
+    matches = [
+        node
+        for node in list_root_nodes(config)
+        if _node_name(node) == name and _is_folder_node(node)
+    ]
     if not matches:
         search_result = call_docs_tool(
             config, "search_documents", {"keyword": name, "pageSize": 30}
@@ -388,11 +407,7 @@ def local_upload_root_folder_id(config: dict[str, Any]) -> str:
         matches = [
             node
             for node in _iter_nodes(_data_payload(search_result))
-            if _node_name(node) == name
-            and (
-                str(node.get("nodeType") or "").lower() == "folder"
-                or str(node.get("extension") or "").lower() == "folder"
-            )
+            if _node_name(node) == name and _is_folder_node(node)
         ]
     if not matches:
         raise RuntimeError(
@@ -434,9 +449,7 @@ def child_folders(config: dict[str, Any], parent_id: str) -> list[tuple[str, str
     """返回直接子文件夹的 (node_id, name)。"""
     folders: list[tuple[str, str]] = []
     for node in list_nodes(config, parent_id):
-        node_type = str(node.get("nodeType") or "").lower()
-        extension = str(node.get("extension") or "").lower()
-        if node_type != "folder" and extension != "folder":
+        if not _is_folder_node(node):
             continue
         node_id = _node_id(node)
         name = _node_name(node)

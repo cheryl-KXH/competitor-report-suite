@@ -56,31 +56,6 @@
       "cellType": "link",
       "required": false
     },
-    "dianping": {
-      "label": "大众点评",
-      "fieldId": "Hkl2xDv",
-      "required": false
-    },
-    "weibo": {
-      "label": "微博",
-      "fieldId": "GGXHqyG",
-      "required": false
-    },
-    "xiaohongshu": {
-      "label": "小红书",
-      "fieldId": "NvvlACX",
-      "required": false
-    },
-    "douyin": {
-      "label": "抖音",
-      "fieldId": "CtZivbf",
-      "required": false
-    },
-    "bilibili": {
-      "label": "B站",
-      "fieldId": "KfgxCcf",
-      "required": false
-    },
     "report": {
       "label": "跟踪反馈报告",
       "fieldId": "wAez0WM",

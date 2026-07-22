@@ -14,6 +14,9 @@ from scripts.delivery.processing import (
     _store_sale_days,
     generate_jd_summary,
     generate_platform_delivery_summary,
+    read_annotation,
+    tracked_product_statuses,
+    write_product_menu,
 )
 from scripts.delivery.generate_tables import generate_delivery_tables
 
@@ -39,6 +42,55 @@ def annotation(
 
 
 class DeliveryStatisticsTests(unittest.TestCase):
+    def test_product_menu_offers_manual_statuses_and_reads_them(self) -> None:
+        rows = [sale("美团", "门店1", "在售产品", 10, date(2026, 7, 10))]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_product_menu(rows, Path(tmp) / "产品清单.xlsx")
+            workbook = load_workbook(path)
+            sheet = workbook.active
+            validations = list(sheet.data_validations.dataValidation)
+            self.assertEqual(len(validations), 1)
+            self.assertEqual(validations[0].formula1, '"提前下架,外卖无售"')
+            self.assertEqual(
+                validations[0].prompt,
+                "本列可人工增加上新日期标注；关注产品无数据时，请在各平台新增一行填入产品名称并标注"
+                "“提前下架”或“外卖无售”",
+            )
+            sheet.append(["美团", "品牌A", "缺失产品A", "提前下架"])
+            sheet.append(["饿了么", "品牌A", "缺失产品B", "外卖无售"])
+            workbook.save(path)
+
+            annotations = read_annotation(path)
+
+        self.assertEqual(
+            tracked_product_statuses(
+                annotations, "品牌A", ["缺失产品A", "缺失产品B"]
+            ),
+            {"缺失产品A": "提前下架", "缺失产品B": "外卖无售"},
+        )
+
+    def test_product_menu_rejects_unknown_manual_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "产品清单.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["平台", "品牌", "产品", "近30日上新日期"])
+            sheet.append(["美团", "品牌A", "缺失产品", "已下架"])
+            workbook.save(path)
+
+            with self.assertRaisesRegex(RuntimeError, "日期标注.*无效"):
+                read_annotation(path)
+
+    def test_product_menu_rejects_old_32_day_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "旧产品清单.xlsx"
+            workbook = Workbook()
+            workbook.active.append(["平台", "品牌", "产品", "近32日上新日期"])
+            workbook.save(path)
+
+            with self.assertRaisesRegex(RuntimeError, "缺少字段.*近30日上新日期"):
+                read_annotation(path)
+
     def test_meituan_uses_latest_rows_and_sums_store_sale_days(self) -> None:
         rows = [
             sale("美团", "门店1", "产品A", 999, date(2026, 7, 9)),
@@ -91,13 +143,37 @@ class DeliveryStatisticsTests(unittest.TestCase):
         self.assertEqual(average_format, "0.0000")
         self.assertEqual(share_format, "0.00%")
 
-    def test_future_launch_date_reports_context(self) -> None:
-        rows = [sale("美团", "门店1", "产品A", 1, date(2026, 7, 10))]
+    def test_future_launch_date_within_two_days_is_kept(self) -> None:
+        rows = [sale("美团", "门店1", "产品A", 0, date(2026, 7, 10))]
         annotations = [annotation("美团", "产品A", date(2026, 7, 11))]
+        lookup = _annotation_lookup(annotations)
+
+        self.assertEqual(_store_sale_days(rows[0], lookup), -1)
+        self.assertEqual(
+            _store_sale_days(
+                rows[0],
+                _annotation_lookup([annotation("美团", "产品A", date(2026, 7, 12))]),
+            ),
+            -2,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "美团.xlsx"
+            generate_platform_delivery_summary(rows, annotations, "美团", output)
+            values = list(load_workbook(output, data_only=True).active.values)
+
+        self.assertEqual(
+            values[1],
+            (1, "产品A", 0, 0, 0, -1, 1, -1, datetime(2026, 7, 11)),
+        )
+
+    def test_future_launch_date_over_two_days_reports_context(self) -> None:
+        rows = [sale("美团", "门店1", "产品A", 1, date(2026, 7, 10))]
+        annotations = [annotation("美团", "产品A", date(2026, 7, 13))]
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(
                 RuntimeError,
-                "平台=美团，品牌=品牌A，产品=产品A，上架日期=2026-07-11，抓取日期=2026-07-10",
+                "平台=美团，品牌=品牌A，产品=产品A，上架日期=2026-07-13，抓取日期=2026-07-10",
             ):
                 generate_platform_delivery_summary(rows, annotations, "美团", Path(tmp) / "美团.xlsx")
 
@@ -159,7 +235,7 @@ class DeliveryStatisticsTests(unittest.TestCase):
 
             annotation_wb = Workbook()
             annotation_ws = annotation_wb.active
-            annotation_ws.append(["平台", "品牌", "产品", "近32日上新日期"])
+            annotation_ws.append(["平台", "品牌", "产品", "近30日上新日期"])
             annotation_ws.append(["美团", "品牌A", "产品A", "2026-07-05"])
             annotation_ws.append(["饿了么", "品牌A", "产品A", "2026-07-08"])
             annotation_ws.append(["京东秒送", "品牌A", "产品A", "2026-07-05"])

@@ -23,6 +23,7 @@ from scripts.reporting.html import (
     build_report_html,
     normalize_product_key,
 )
+from scripts.reporting.pdf import render_html_to_pdf
 
 
 def _safe_filename(value: str) -> str:
@@ -188,6 +189,7 @@ def generate_report(
     jd_path: Path | None = None,
     social_paths: dict[str, Path] | None = None,
     launch_dates: dict[str, date | None] | None = None,
+    delivery_statuses: dict[str, str] | None = None,
     output_dir: Path | None = None,
     configs: dict[str, dict[str, Any]] | None = None,
     delivery_report: DeliveryReport | None = None,
@@ -196,6 +198,7 @@ def generate_report(
 ) -> ReportBuildResult:
     configs = configs or load_configs()
     launch_dates = launch_dates or {}
+    delivery_statuses = delivery_statuses or {}
     social_paths = social_paths or {}
     product_warnings: list[str] = []
     try:
@@ -218,17 +221,27 @@ def generate_report(
         social_paths=social_paths,
         product_infos=product_infos,
         launch_dates=launch_dates,
+        delivery_statuses=delivery_statuses,
         output_path=out_dir / filename,
         configs=configs,
         delivery_report=delivery_report,
         jd_report=jd_report,
         social_report_models=social_reports,
     )
-    return ReportBuildResult(result.path, tuple(dict.fromkeys([*product_warnings, *result.warnings])))
+    pdf_path = render_html_to_pdf(
+        result.path,
+        result.path.with_suffix(".pdf"),
+        config=configs.get("report_rules", {}).get("pdf", {}),
+    )
+    return ReportBuildResult(
+        result.path,
+        tuple(dict.fromkeys([*product_warnings, *result.warnings])),
+        pdf_path,
+    )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="生成 HTML 竞品跟踪反馈报告")
+    parser = argparse.ArgumentParser(description="生成 HTML 和 PDF 竞品跟踪反馈报告")
     parser.add_argument("--record-id", required=True)
     parser.add_argument("--brand", required=True)
     parser.add_argument("--products", required=True, help="多个产品用英文或中文逗号分隔")
@@ -253,7 +266,8 @@ def main() -> int:
         jd_path=Path(args.jd) if args.jd else None,
         output_dir=Path(args.output_dir) if args.output_dir else None,
     )
-    print(f"已生成：{result.path}")
+    print(f"已生成 HTML：{result.path}")
+    print(f"已生成 PDF：{result.pdf_path}")
     for warning in result.warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
     return 0

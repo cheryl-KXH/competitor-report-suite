@@ -102,9 +102,30 @@ class ReportingTests(unittest.TestCase):
             report = read_social_report(path)
         self.assertEqual(report.period, "6.18-7.18")
         self.assertEqual(report.total_users, 20)
+        self.assertEqual(report.positive_count, 17)
+        self.assertEqual(report.negative_count, 3)
+        self.assertEqual(report.total_count, 20)
         self.assertEqual(report.positive_top[0], ("清爽不腻", 8))
         self.assertNotIn("好喝，喜欢，推荐", [label for label, _ in report.positive_top])
         self.assertEqual(report.sections[-1].positive_tags, ())
+
+    def test_social_keywords_merge_five_platforms_filter_exact_generic_tags_and_take_top_three(self) -> None:
+        report = social_report_from_summaries(
+            title="新品第三方平台评价反馈",
+            period="6.18-7.18",
+            summaries=[
+                PlatformSummary("dianping", "大众点评", (("清爽", 2),), (("太甜", 1),), 1, 1),
+                PlatformSummary("weibo", "微博", (("好喝，喜欢，推荐", 20), ("清爽", 3)), (("难喝，不喜欢，不推荐", 20), ("太甜", 2)), 2, 2),
+                PlatformSummary("xiaohongshu", "小红书", (("茶香", 4),), (("果味淡", 4),), 1, 1),
+                PlatformSummary("douyin", "抖音", (("颜值高", 3),), (("性价比低", 3),), 1, 1),
+                PlatformSummary("bilibili", "B站", (("口感顺滑", 2), ("好评", 1)), (("奶味淡", 2), ("差评", 1)), 1, 1),
+            ],
+        )
+
+        self.assertEqual(report.positive_top, (("清爽", 5), ("茶香", 4), ("颜值高", 3)))
+        self.assertEqual(report.negative_top, (("果味淡", 4), ("太甜", 3), ("性价比低", 3)))
+        self.assertIn("好评", [label for label, _ in report.sections[-1].positive_tags])
+        self.assertIn("差评", [label for label, _ in report.sections[-1].negative_tags])
 
     def test_html_is_self_contained_and_omits_zero_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,6 +208,7 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("touch-action:pan-y pinch-zoom", document)
         self.assertIn("th,td{border-width:1.5px}", document)
         self.assertIn(".report-viewport,.report-scale{width:auto!important", document)
+        self.assertIn("height:auto!important;overflow:visible!important", document)
         self.assertIn("table{width:100%!important;max-width:100%}", document)
         self.assertIn(".total-row>*{font-weight:700;background:#D9D9D9}", document)
         self.assertIn("line-height:18px;color:#999999", document)
@@ -208,6 +230,16 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("text-align:justify;text-align-last:left;margin:1px 0 20px", document)
         self.assertIn(".sales-table,.jd-table{margin-bottom:0}", document)
         self.assertIn(".platform-total th,.platform-total td{font-weight:700}", document)
+        self.assertIn('class="pdf-keep-together product-info-module"', document)
+        self.assertIn('class="pdf-keep-together feedback-summary-module"', document)
+        self.assertIn('class="feedback-detail-heading"', document)
+        self.assertIn(".pdf-keep-together{break-inside:avoid-page!important", document)
+        self.assertIn(
+            ".feedback-detail-table-wrap,.feedback-detail-table{break-inside:auto!important;page-break-inside:auto!important}",
+            document,
+        )
+        self.assertIn("width:calc(100% - 1px)!important", document)
+        self.assertNotIn(".feedback-fragment{break-inside:avoid-page", document)
         self.assertNotIn(".product-section,.product-info,.feedback-title-row{break-inside:avoid}", document)
         self.assertIn(".product-info,.feedback-title-row{break-inside:avoid}", document)
         self.assertIn(".product-info th{width:18%", document)
@@ -263,7 +295,7 @@ class ReportingTests(unittest.TestCase):
                 SocialSection("微博", (), (), 0, 0),
                 SocialSection(
                     "小红书",
-                    (("很长的正面评价标签用于验证内容不会被省略", 3),),
+                    (("很长的正面评价标签用于验证内容不会被省略", 13),),
                     (("味道寡淡", 2), ("性价比低", 1)),
                     3,
                     3,
@@ -279,11 +311,17 @@ class ReportingTests(unittest.TestCase):
         summary = _social_summary_html(report)
 
         self.assertEqual(document.count('<col class="'), 6)
+        self.assertEqual(document.count('class="table-scroll feedback-detail-table-wrap"'), 1)
+        self.assertEqual(document.count('class="feedback-table feedback-detail-table"'), 1)
+        self.assertNotIn("feedback-table-fragment", document)
         self.assertIn('class="feedback-title-cell" colspan="4"', document)
         self.assertIn('<th class="kpi-label">好评率</th><td class="kpi-value">81%</td>', document)
         self.assertIn('<th class="kpi-label">总计</th><td class="kpi-value">16</td>', document)
         self.assertIn('<th class="kpi-label">好评用户数</th><td class="kpi-value">13</td>', document)
         self.assertIn('<th class="kpi-label">差评用户数</th><td class="kpi-value">3</td>', document)
+        self.assertNotIn('<th class="kpi-label">总评论数</th>', document)
+        self.assertNotIn('<th class="kpi-label">好评数</th>', document)
+        self.assertNotIn('<th class="kpi-label">差评数</th>', document)
         self.assertNotIn("暂无评论", document)
         self.assertIn(
             '<tr class="platform-total"><th>好评用户数</th><td>0</td><th>差评用户数</th><td>0</td>',
@@ -296,6 +334,9 @@ class ReportingTests(unittest.TestCase):
         self.assertNotIn(">/</td>", document)
         self.assertEqual(summary.count("<p"), 1)
         self.assertIn('<p class="social-summary">', summary)
+        self.assertIn('第三方评论共 26 条', summary)
+        self.assertIn('好评（23 条）', summary)
+        self.assertIn('差评（3 条）', summary)
         self.assertEqual(summary.count("<br>"), 2)
 
     def test_html_accepts_in_memory_statistics_without_intermediate_files(self) -> None:
@@ -336,9 +377,12 @@ class ReportingTests(unittest.TestCase):
                 delivery_report=delivery,
                 jd_report=jd,
                 social_report_models={"新品": social},
+                delivery_statuses={"新品": "提前下架"},
             )
             document = output.read_text(encoding="utf-8")
         self.assertIn("新品30日销量表现及消费者评论情况", document)
+        self.assertIn("<strong>新品</strong>：提前下架，暂无月销数据。", document)
+        self.assertNotIn("<strong>新品</strong>：销量排名第", document)
         self.assertNotIn("新品销量表现（30日）", document)
         self.assertIn("新品 6.18-7.18 第三方平台评价反馈", document)
         self.assertNotIn("品牌-新品 消费者反馈", document)

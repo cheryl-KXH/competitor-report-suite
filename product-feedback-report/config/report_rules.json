@@ -10,6 +10,11 @@
     "failed": "生成失败"
   },
   "reportTitle": "竞品跟踪反馈报告",
+  "pdf": {
+    "browserExecutable": "",
+    "timeoutSeconds": 180,
+    "extraArgs": []
+  },
   "productInfoSource": {
     "baseId": "14lgGw3P8vvl1yqpiGv2oZoO85daZ90D",
     "tableId": "hERWDMS",

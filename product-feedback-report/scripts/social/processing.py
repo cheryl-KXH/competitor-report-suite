@@ -27,6 +27,14 @@ class PlatformSummary:
     positive_users: int
     negative_users: int
 
+    @property
+    def positive_count(self) -> int:
+        return sum(count for _, count in self.positive_tags)
+
+    @property
+    def negative_count(self) -> int:
+        return sum(count for _, count in self.negative_tags)
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()

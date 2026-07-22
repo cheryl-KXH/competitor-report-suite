@@ -191,14 +191,6 @@ async def generate_delivery_tables(request: Request) -> AcceptedResponse:
     return AcceptedResponse(ok=True, status="accepted", recordId=record_id, message="外卖数据统计任务已接收。")
 
 
-@app.post("/generate-consumer-feedback", response_model=AcceptedResponse)
-async def generate_consumer_feedback(request: Request) -> AcceptedResponse:
-    record_id, secret = await parse_request(request)
-    require_secret(secret)
-    _submit(FEEDBACK_ROOT, "run_generate_consumer_feedback_tables", record_id)
-    return AcceptedResponse(ok=True, status="accepted", recordId=record_id, message="消费者反馈统计任务已接收。")
-
-
 @app.post("/generate-report", response_model=AcceptedResponse)
 async def generate_report(request: Request) -> AcceptedResponse:
     record_id, secret = await parse_request(request)

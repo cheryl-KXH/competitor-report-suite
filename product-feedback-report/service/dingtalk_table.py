@@ -12,15 +12,14 @@ from typing import Any
 ATTACHMENT_KEYS = {
     "deliveryData",
     "productMenu",
-    "weibo",
-    "xiaohongshu",
-    "douyin",
-    "bilibili",
     "socialCleanedRawData",
 }
 LINK_KEYS = {"meituanData", "elemeData", "jdData", "report", "folder"}
 ATTACHMENT_CLEAR_ATTEMPTS = 5
 ATTACHMENT_CLEAR_DELAY_SECONDS = 0.5
+DATA_NOT_READY_ATTEMPTS = 8
+DATA_NOT_READY_DELAY_SECONDS = 1.0
+DATA_NOT_READY_CODE = "InvalidRequest.DataNotReady"
 
 
 @dataclass
@@ -53,16 +52,31 @@ def parse_mcporter_json(stdout: str) -> dict[str, Any]:
 
 def call_table_tool(config: dict[str, Any], tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     cmd = _selector(config, tool_name) + ["--args", json.dumps(payload, ensure_ascii=False)]
-    try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise RuntimeError("找不到 mcporter，请先安装并配置 dingtalk-ai-table。") from exc
-    if result.returncode != 0:
-        raise RuntimeError(f"钉钉 AI 表调用失败：{result.stderr.strip() or result.stdout.strip()}")
-    data = parse_mcporter_json(result.stdout)
-    if data.get("status") not in (None, "success", "ok"):
-        raise RuntimeError(f"钉钉 AI 表返回失败：{json.dumps(data.get('error', data), ensure_ascii=False)}")
-    return data
+    attempts = DATA_NOT_READY_ATTEMPTS if tool_name == "query_records" else 1
+    for attempt in range(attempts):
+        try:
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError("找不到 mcporter，请先安装并配置 dingtalk-ai-table。") from exc
+        if result.returncode != 0:
+            raise RuntimeError(f"钉钉 AI 表调用失败：{result.stderr.strip() or result.stdout.strip()}")
+        data = parse_mcporter_json(result.stdout)
+        status = data.get("status")
+        if status in ("success", "ok") or (status is None and "error" not in data):
+            return data
+        error = data.get("error", data)
+        retryable_not_ready = (
+            isinstance(error, dict)
+            and str(error.get("code") or "") == DATA_NOT_READY_CODE
+            and error.get("retryable") is True
+        )
+        if retryable_not_ready and attempt + 1 < attempts:
+            time.sleep(DATA_NOT_READY_DELAY_SECONDS)
+            continue
+        raise RuntimeError(
+            f"钉钉 AI 表返回失败：{json.dumps(error, ensure_ascii=False)}"
+        )
+    raise RuntimeError("钉钉 AI 表读取重试次数已耗尽。")
 
 
 def field_defs(configs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

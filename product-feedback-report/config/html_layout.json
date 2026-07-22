@@ -41,7 +41,8 @@
     "cellPaddingVerticalPx": 0,
     "cellPaddingHorizontalPx": 6,
     "fontSizePx": 13.33,
-    "lineHeightPx": 20
+    "lineHeightPx": 20,
+    "detailLineHeightPx": 19
   },
   "productImage": {
     "heightCm": 4,
