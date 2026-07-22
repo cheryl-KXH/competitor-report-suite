@@ -11,6 +11,7 @@ from scripts.reporting.html import (
     ProductInfo,
     SocialReport,
     SocialSection,
+    _jd_html,
     _social_detail_html,
     _social_summary_html,
     build_report_html,
@@ -77,12 +78,29 @@ class ReportingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "匹配到多个外卖商品"):
                 combine_delivery_sales(mt, elm, ["新品"])
 
-    def test_jd_top20_keeps_ties_and_total_uses_all_rows(self) -> None:
+    def test_jd_model_keeps_all_rows_and_total_uses_all_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self._jd_workbook(Path(tmp) / "京东.xlsx")
             rows, total = read_jd_sales(path)
-        self.assertEqual([row.rank for row in rows], [1, 1, 3])
+        self.assertEqual([row.rank for row in rows], [1, 1, 3, 21])
         self.assertEqual(total, 260)
+
+    def test_jd_html_adds_tracked_product_outside_top20_at_end(self) -> None:
+        metrics = [
+            {"product": f"商品{i}", "sales": 1000 - i}
+            for i in range(1, 22)
+        ]
+        metrics.append({"product": "瓶子龙眼椰", "sales": 1})
+        rows, total = jd_report_from_metrics(metrics)
+
+        document = _jd_html("爷爷不泡茶", rows, total, ["瓶子龙眼椰"])
+
+        self.assertNotIn(">商品21</td>", document)
+        self.assertIn(
+            '<tr class="tracked-row"><td class="rank-cell">22</td><td>瓶子龙眼椰</td>',
+            document,
+        )
+        self.assertLess(document.index(">商品20</td>"), document.index(">瓶子龙眼椰</td>"))
 
     def test_social_parser_aggregates_summary_and_keeps_empty_platforms_blank(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -334,8 +352,8 @@ class ReportingTests(unittest.TestCase):
         self.assertNotIn(">/</td>", document)
         self.assertEqual(summary.count("<p"), 1)
         self.assertIn('<p class="social-summary">', summary)
-        self.assertIn('第三方评论共 26 条', summary)
-        self.assertIn('好评（23 条）', summary)
+        self.assertIn('第三方评论共 16 条', summary)
+        self.assertIn('好评（13 条）', summary)
         self.assertIn('差评（3 条）', summary)
         self.assertEqual(summary.count("<br>"), 2)
 

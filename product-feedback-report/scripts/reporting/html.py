@@ -340,15 +340,14 @@ def jd_report_from_metrics(
         rank = previous_rank if previous_sales is not None and sales == previous_sales else index
         previous_sales = sales
         previous_rank = rank
-        if rank <= 20:
-            rows.append(
-                JdSale(
-                    rank=rank,
-                    product=_text(item.get("product")),
-                    total_sales=sales,
-                    share=sales / total if total else 0.0,
-                )
+        rows.append(
+            JdSale(
+                rank=rank,
+                product=_text(item.get("product")),
+                total_sales=sales,
+                share=sales / total if total else 0.0,
             )
+        )
     return tuple(rows), total
 
 
@@ -379,7 +378,7 @@ def read_jd_sales(path: Path | None) -> tuple[tuple[JdSale, ...], float]:
                 share=_number(row[columns["总销量占比"]]),
             )
         )
-    return tuple(row for row in all_rows if row.rank <= 20), sum(row.total_sales for row in all_rows)
+    return tuple(all_rows), sum(row.total_sales for row in all_rows)
 
 
 def _counter_top(counter: Counter[str], generic: set[str], limit: int = 3) -> tuple[tuple[str, int], ...]:
@@ -641,7 +640,10 @@ def _jd_html(
     tracked_keys = set(_tracked_matches(tracked_products, names).values())
     body_rows: list[str] = []
     for row in rows:
-        class_name = ' class="tracked-row"' if normalize_product_key(row.product) in tracked_keys else ""
+        product_key = normalize_product_key(row.product)
+        if row.rank > 20 and product_key not in tracked_keys:
+            continue
+        class_name = ' class="tracked-row"' if product_key in tracked_keys else ""
         body_rows.append(
             f'<tr{class_name}><td class="rank-cell">{row.rank}</td><td>{_escape(row.product)}</td>'
             f"<td>{_format_count(row.total_sales)}</td><td>{_format_percent(row.share)}</td></tr>"
@@ -685,13 +687,13 @@ def _social_summary_html(social: SocialReport | None) -> str:
     if not social:
         return '<p class="missing-note">消费者反馈统计暂无法获取。</p>'
     period = f"（{_escape(social.period)}）" if social.period else ""
-    if not social.total_count:
+    if not social.total_users:
         return f'<p>上市30日{period}暂未获取到有效第三方评论。</p>'
     return (
-        f'<p class="social-summary">上市30日{period}第三方评论共 {_format_count(social.total_count)} 条，'
+        f'<p class="social-summary">上市30日{period}第三方评论共 {_format_count(social.total_users)} 条，'
         f'好评率为 {_format_positive_rate(social.positive_rate)}：<br>'
-        f'好评（{_format_count(social.positive_count)} 条）主要提及关键词：{_escape(_top_labels(social.positive_top))}；<br>'
-        f'差评（{_format_count(social.negative_count)} 条）主要提及关键词：{_escape(_top_labels(social.negative_top))}。</p>'
+        f'好评（{_format_count(social.positive_users)} 条）主要提及关键词：{_escape(_top_labels(social.positive_top))}；<br>'
+        f'差评（{_format_count(social.negative_users)} 条）主要提及关键词：{_escape(_top_labels(social.negative_top))}。</p>'
     )
 
 

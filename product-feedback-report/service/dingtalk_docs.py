@@ -488,6 +488,7 @@ def delete_existing_file(config: dict[str, Any], folder_id: str | None, filename
         return
     expected = filename.strip()
     expected_stem = Path(expected).stem
+    expected_suffix = Path(expected).suffix.lower()
     duplicate_pattern = re.compile(rf"^{re.escape(expected_stem)}\(\d+\)$")
     for node in list_nodes(config, folder_id):
         node_id = _node_id(node)
@@ -496,7 +497,16 @@ def delete_existing_file(config: dict[str, Any], folder_id: str | None, filename
         node_filename = _node_filename(node)
         node_name = _node_name(node)
         node_stem = Path(node_filename).stem
-        if node_filename == expected or node_name in {expected, expected_stem} or duplicate_pattern.match(node_name) or duplicate_pattern.match(node_stem):
+        node_suffix = Path(node_filename).suffix.lower()
+        same_file_type = node_suffix == expected_suffix
+        same_name = node_filename == expected or (
+            same_file_type and node_name in {expected, expected_stem}
+        )
+        numbered_duplicate = same_file_type and (
+            duplicate_pattern.match(Path(node_name).stem) is not None
+            or duplicate_pattern.match(node_stem) is not None
+        )
+        if same_name or numbered_duplicate:
             temp_name = f"待删除-{int(time.time())}-{node_id[:8]}-{node_filename}"
             call_docs_tool(config, "rename_document", {"nodeId": node_id, "newName": temp_name[:255]})
             call_docs_tool(config, "delete_document", {"nodeId": node_id})

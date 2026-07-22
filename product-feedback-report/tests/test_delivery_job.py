@@ -1660,6 +1660,7 @@ class DeliveryJobTests(unittest.TestCase):
             {"nodeId": "exact", "name": "产品清单", "extension": "xlsx"},
             {"nodeId": "copy-1", "name": "产品清单(1)", "extension": "xlsx"},
             {"nodeId": "copy-2", "name": "产品清单(2).xlsx", "extension": "xlsx"},
+            {"nodeId": "same-stem-pdf", "name": "产品清单", "extension": "pdf"},
             {"nodeId": "other", "name": "其他文件", "extension": "xlsx"},
         ]
         with (
@@ -1674,6 +1675,27 @@ class DeliveryJobTests(unittest.TestCase):
             if item.args[1] == "delete_document"
         ]
         self.assertEqual(deleted_ids, ["exact", "copy-1", "copy-2"])
+
+    def test_uploading_pdf_does_not_delete_same_named_html(self) -> None:
+        nodes = [
+            {"nodeId": "html", "name": "霸王茶姬：新品 20260718", "extension": "html"},
+            {"nodeId": "pdf", "name": "霸王茶姬：新品 20260718", "extension": "pdf"},
+            {"nodeId": "pdf-copy", "name": "霸王茶姬：新品 20260718(1)", "extension": "pdf"},
+        ]
+        with (
+            patch("service.dingtalk_docs.list_nodes", return_value=nodes),
+            patch("service.dingtalk_docs.call_docs_tool") as mcp,
+        ):
+            dingtalk_docs.delete_existing_file(
+                {}, "folder", "霸王茶姬：新品 20260718.pdf"
+            )
+
+        deleted_ids = [
+            item.args[2]["nodeId"]
+            for item in mcp.call_args_list
+            if item.args[1] == "delete_document"
+        ]
+        self.assertEqual(deleted_ids, ["pdf", "pdf-copy"])
 
     def test_dingtalk_link_takes_priority_over_stale_same_named_local_file(self) -> None:
         value = [{"name": "产品清单.xlsx", "url": "https://alidocs.dingtalk.com/i/nodes/menu-node"}]
