@@ -63,25 +63,110 @@ cp config/dingtalk.example.json config/dingtalk.json
 
 打开 `config/dingtalk.json`，根据自己的钉钉 AI 表填写连接信息。真实 Streamable HTTP URL 可能包含访问令牌，不要提交到 GitHub。
 
-校验配置：
+### 生成新品周报：完整命令
+
+以下命令都要在 `new-product-monitor/` 目录中运行，并确保虚拟环境已激活：
+
+```bash
+cd ~/Desktop/competitor-report-suite/new-product-monitor
+source .venv/bin/activate
+```
+
+先校验并查看当前配置：
 
 ```bash
 python scripts/generate_weekly_report.py --validate-config
+python scripts/generate_weekly_report.py --explain-config
 ```
 
-生成 Excel、HTML 和 PNG 周报：
+#### 默认生成全部格式
+
+不带参数时，统一入口会生成 Excel、HTML 和 PNG：
 
 ```bash
 python scripts/generate_weekly_outputs.py
 ```
 
-指定日期范围：
+默认结果位于：
+
+```text
+new-product-monitor/outputs/竞品新品周报YYYY-MM-DD_YYYY-MM-DD/
+```
+
+同名目录已经存在时会自动添加 `_2`、`_3`，不会覆盖旧结果。
+
+#### 指定生成格式
+
+```bash
+# 只生成 Excel
+python scripts/generate_weekly_outputs.py --output-mode excel
+
+# 只生成 HTML
+python scripts/generate_weekly_outputs.py --output-mode html
+
+# 只生成 PNG 长图
+python scripts/generate_weekly_outputs.py --output-mode image
+
+# 明确生成全部格式
+python scripts/generate_weekly_outputs.py --output-mode all
+```
+
+#### 指定报告日期范围
+
+日期格式必须为 `YYYYMMDD`：
 
 ```bash
 python scripts/generate_weekly_outputs.py \
   --startDate 20260509 \
   --endDate 20260515
 ```
+
+不传日期时，脚本按“周六到周五”的规则计算最近完整周期。
+
+#### 按业务生成
+
+支持的业务包括 `喜茶`、`野萃山` 和 `茶坊`：
+
+```bash
+python scripts/generate_weekly_outputs.py --business 喜茶
+
+python scripts/generate_weekly_outputs.py \
+  --business 野萃山 \
+  --startDate 20260509 \
+  --endDate 20260515 \
+  --output-mode all
+```
+
+#### 手动指定竞品品牌
+
+品牌之间使用英文逗号分隔：
+
+```bash
+python scripts/generate_weekly_report.py \
+  --brands 霸王茶姬,古茗,乐乐茶
+```
+
+同时指定日期和品牌：
+
+```bash
+python scripts/generate_weekly_report.py \
+  --startDate 20260502 \
+  --endDate 20260508 \
+  --brands 霸王茶姬,古茗
+```
+
+如果同时传入 `--brands` 和 `--business`，脚本优先使用 `--brands`。
+
+#### 只生成 Excel，并指定输出文件
+
+```bash
+python scripts/generate_weekly_report.py \
+  --startDate 20260502 \
+  --endDate 20260508 \
+  --output outputs/竞品新品周报2026-05-02_2026-05-08.xlsx
+```
+
+### 通过 HTTP 服务生成新品周报
 
 启动 HTTP 服务：
 
@@ -117,32 +202,134 @@ cp config/dingtalk.example.json config/dingtalk.json
 
 打开 `config/dingtalk.json`，填写自己的 `baseId`、`tableId` 和连接信息。
 
-启动 HTTP 服务。因为 8000 端口可能已被新品周报服务占用，这里示例使用 8001：
+先检查配置：
 
 ```bash
+python -m scripts.tools.validate_config
+```
+
+### 通过 HTTP 服务生成反馈报告
+
+因为 8000 端口可能已被新品周报服务占用，这里使用 8001：
+
+```bash
+cd ~/Desktop/competitor-report-suite/product-feedback-report
+source .venv/bin/activate
 uvicorn service.app:app --host 0.0.0.0 --port 8001
 ```
 
-验证服务：
+保持这个终端窗口运行。打开第二个终端窗口检查服务：
 
 ```bash
 curl http://127.0.0.1:8001/health
 ```
 
-该服务提供的主要接口包括：
+正常响应为：
 
-- `POST /prepare-product-menu`
-- `POST /generate-delivery-tables`
-- `POST /generate-report`
-- `POST /finalize-report`
+```json
+{"ok":true}
+```
 
-请求需要传入钉钉记录 ID，例如：
+将下面所有命令里的 `你的记录ID` 替换成钉钉 AI 表当前行的真实记录 ID。
+
+#### 第一步：生成产品清单
 
 ```bash
 curl -X POST http://127.0.0.1:8001/prepare-product-menu \
   -H "Content-Type: application/json" \
   -d '{"recordId":"你的记录ID"}'
 ```
+
+该步骤会生成产品清单供人工检查上新日期。需要修改时，下载自动生成的清单，调整后上传到 AI 表的“产品清单Adjusted”。
+
+#### 第二步：生成外卖统计数表
+
+```bash
+curl -X POST http://127.0.0.1:8001/generate-delivery-tables \
+  -H "Content-Type: application/json" \
+  -d '{"recordId":"你的记录ID"}'
+```
+
+运行前，AI 表当前行必须已经上传单个 `.xlsx` 外卖数据附件。
+
+#### 第三步：生成完整反馈报告
+
+```bash
+curl -X POST http://127.0.0.1:8001/generate-report \
+  -H "Content-Type: application/json" \
+  -d '{"recordId":"你的记录ID"}'
+```
+
+该步骤会读取当前行的外卖数据、可选的人工调整产品清单和社媒清洗数据，生成统计表及最终 HTML/PDF 报告，并上传到钉钉文档。
+
+#### 第四步：检查完成后归档原始文件
+
+```bash
+curl -X POST http://127.0.0.1:8001/finalize-report \
+  -H "Content-Type: application/json" \
+  -d '{"recordId":"你的记录ID"}'
+```
+
+`/finalize-report` 是同步接口。等它返回 `HTTP 200` 后，才代表上传和字段回写全部完成。
+
+#### 使用服务密钥调用
+
+如果启动服务前设置了 `REPORT_SERVICE_SECRET`，每次请求都要传相同的 `secret`：
+
+```bash
+curl -X POST http://127.0.0.1:8001/generate-report \
+  -H "Content-Type: application/json" \
+  -d '{"recordId":"你的记录ID","secret":"你的服务密钥"}'
+```
+
+### 不连接钉钉：使用本地文件调试反馈报告
+
+以下命令也要在 `product-feedback-report/` 目录运行。把 `/path/to/...` 替换成真实文件或文件夹路径；路径含空格或中文时保留双引号。
+
+#### 1. 从样例文件夹生成产品清单
+
+```bash
+python -m scripts.delivery.prepare_product_menu \
+  --record-id local-test \
+  --input-dir "/path/to/样例文件夹" \
+  --report-date 2026-07-21
+```
+
+#### 2. 根据产品清单生成外卖数表
+
+```bash
+python -m scripts.delivery.generate_tables \
+  --record-id local-test \
+  --input-dir "/path/to/样例文件夹" \
+  --annotation "outputs/local-test/产品清单及上新日期.xlsx"
+```
+
+#### 3. 生成社媒统计数表
+
+```bash
+python -m scripts.social.generate_tables \
+  --record-id local-test \
+  --brand "品牌名称" \
+  --product "新品名称" \
+  --start-date 6.10 \
+  --end-date 7.9 \
+  --cleaned-raw-data "/path/to/品牌-YYYYMMDD-新品-社媒清洗数据.xlsx"
+```
+
+#### 4. 使用已整理的数表生成最终报告
+
+```bash
+python -m scripts.reporting.generate_report \
+  --record-id local-test \
+  --brand "品牌名称" \
+  --products "新品A,新品B" \
+  --report-date 2026-07-18 \
+  --meituan "/path/to/品牌-20260718-美团.xlsx" \
+  --eleme "/path/to/品牌-20260718-饿了么.xlsx" \
+  --jd "/path/to/品牌-20260718-京东.xlsx"
+```
+
+未传 `--output-dir` 时，本地命令行生成结果默认写入 `product-feedback-report/outputs/`。
 
 ## 4. 可选：设置服务密钥
 
