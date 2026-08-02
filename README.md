@@ -36,16 +36,17 @@ git clone https://github.com/cheryl-KXH/competitor-report-suite.git
 cd competitor-report-suite
 ```
 
-## 2. 安装新品周报模块
+## 2. 安装统一运行环境
 
-进入模块并创建独立的 Python 虚拟环境：
+`gateway` 会使用当前 Python 解释器启动两个报告项目的任务，因此推荐在仓库根目录只创建一个共享虚拟环境，并把两个项目的依赖都安装进去：
 
 ```bash
-cd new-product-monitor
+cd ~/Desktop/competitor-report-suite
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r new-product-monitor/requirements.txt
+pip install -r product-feedback-report/requirements.txt
 python -m playwright install chromium
 ```
 
@@ -55,13 +56,23 @@ Windows PowerShell 激活虚拟环境时使用：
 .venv\Scripts\Activate.ps1
 ```
 
-创建本地钉钉配置：
+以后启动 Gateway 或执行任一项目的命令前，都先在仓库根目录激活这个环境：
 
 ```bash
-cp config/dingtalk.example.json config/dingtalk.json
+cd ~/Desktop/competitor-report-suite
+source .venv/bin/activate
 ```
 
-打开 `config/dingtalk.json`，根据自己的钉钉 AI 表填写连接信息。真实 Streamable HTTP URL 可能包含访问令牌，不要提交到 GitHub。
+## 3. 配置新品周报模块
+
+从仓库根目录复制配置模板：
+
+```bash
+cp new-product-monitor/config/dingtalk.example.json \
+  new-product-monitor/config/dingtalk.json
+```
+
+打开 `new-product-monitor/config/dingtalk.json`，根据自己的钉钉 AI 表填写连接信息。真实 Streamable HTTP URL 可能包含访问令牌，不要提交到 GitHub。
 
 ### 生成新品周报：完整命令
 
@@ -166,76 +177,95 @@ python scripts/generate_weekly_report.py \
   --output outputs/竞品新品周报2026-05-02_2026-05-08.xlsx
 ```
 
-### 通过 HTTP 服务生成新品周报
+通过钉钉按钮或 HTTP 调用生成周报时，不需要单独启动新品周报服务；请使用下方的统一 Gateway。
 
-启动 HTTP 服务：
+## 4. 配置跟踪反馈报告模块
+
+从仓库根目录复制两个配置模板：
 
 ```bash
-uvicorn service.app:app --host 0.0.0.0 --port 8000
+cp product-feedback-report/config/dingtalk.example.json \
+  product-feedback-report/config/dingtalk.json
+
+cp product-feedback-report/config/dingtalk_docs.example.json \
+  product-feedback-report/config/dingtalk_docs.json
 ```
 
-验证服务：
+打开上述配置，填写自己的 `baseId`、`tableId`、钉钉文档目录和连接信息。
+
+检查配置：
+
+```bash
+cd ~/Desktop/competitor-report-suite/product-feedback-report
+python -m scripts.tools.validate_config
+cd ..
+```
+
+## 5. 启动统一 Gateway（两个报告共用 8000 端口）
+
+Gateway 统一提供新品周报和反馈报告接口。只启动这一个服务，不需要分别启动两个子项目：
+
+```bash
+cd ~/Desktop/competitor-report-suite
+source .venv/bin/activate
+uvicorn gateway.app:app --host 0.0.0.0 --port 8000
+```
+
+保持这个终端窗口运行。打开第二个终端窗口检查：
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-## 3. 安装跟踪反馈报告模块
-
-先退出上一个虚拟环境并返回项目根目录：
-
-```bash
-deactivate
-cd ..
-cd product-feedback-report
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-创建本地钉钉配置：
-
-```bash
-cp config/dingtalk.example.json config/dingtalk.json
-```
-
-打开 `config/dingtalk.json`，填写自己的 `baseId`、`tableId` 和连接信息。
-
-先检查配置：
-
-```bash
-python -m scripts.tools.validate_config
-```
-
-### 通过 HTTP 服务生成反馈报告
-
-因为 8000 端口可能已被新品周报服务占用，这里使用 8001：
-
-```bash
-cd ~/Desktop/competitor-report-suite/product-feedback-report
-source .venv/bin/activate
-uvicorn service.app:app --host 0.0.0.0 --port 8001
-```
-
-保持这个终端窗口运行。打开第二个终端窗口检查服务：
-
-```bash
-curl http://127.0.0.1:8001/health
-```
-
-正常响应为：
+正常响应会包含两个项目的实际目录，例如：
 
 ```json
-{"ok":true}
+{
+  "ok": true,
+  "weeklyRoot": "/Users/你的用户名/Desktop/competitor-report-suite/new-product-monitor",
+  "feedbackRoot": "/Users/你的用户名/Desktop/competitor-report-suite/product-feedback-report"
+}
 ```
 
-将下面所有命令里的 `你的记录ID` 替换成钉钉 AI 表当前行的真实记录 ID。
+如果 `weeklyRoot` 和 `feedbackRoot` 指向正确目录，说明 Gateway 已经找到两个报告项目。
+
+Gateway 在同一个 8000 端口提供以下接口：
+
+| 接口 | 所属报告 | 用途 |
+| --- | --- | --- |
+| `POST /generate-weekly-report` | 新品周报 | 根据钉钉记录生成新品周报 |
+| `POST /prepare-product-menu` | 反馈报告 | 生成产品清单 |
+| `POST /generate-delivery-tables` | 反馈报告 | 生成外卖统计数表 |
+| `POST /generate-consumer-feedback` | 反馈报告 | 生成消费者反馈统计 |
+| `POST /generate-report` | 反馈报告 | 生成完整反馈报告 |
+| `POST /finalize-report` | 反馈报告 | 检查完成后归档原始文件 |
+
+如果需要让钉钉访问本机，再打开第三个终端窗口：
+
+```bash
+ngrok http 8000
+```
+
+钉钉自动化中的所有接口使用同一个 ngrok 域名，只需要改变最后的路径。
+
+### 通过 Gateway 生成新品周报
+
+将 `你的记录ID` 替换成钉钉 AI 表当前行的真实记录 ID：
+
+```bash
+curl -X POST http://127.0.0.1:8000/generate-weekly-report \
+  -H "Content-Type: application/json" \
+  -d '{"recordId":"你的记录ID"}'
+```
+
+### 通过 Gateway 生成反馈报告
+
+下面所有命令同样使用 8000 端口。将 `你的记录ID` 替换成钉钉 AI 表当前行的真实记录 ID。
 
 #### 第一步：生成产品清单
 
 ```bash
-curl -X POST http://127.0.0.1:8001/prepare-product-menu \
+curl -X POST http://127.0.0.1:8000/prepare-product-menu \
   -H "Content-Type: application/json" \
   -d '{"recordId":"你的记录ID"}'
 ```
@@ -245,7 +275,7 @@ curl -X POST http://127.0.0.1:8001/prepare-product-menu \
 #### 第二步：生成外卖统计数表
 
 ```bash
-curl -X POST http://127.0.0.1:8001/generate-delivery-tables \
+curl -X POST http://127.0.0.1:8000/generate-delivery-tables \
   -H "Content-Type: application/json" \
   -d '{"recordId":"你的记录ID"}'
 ```
@@ -255,7 +285,7 @@ curl -X POST http://127.0.0.1:8001/generate-delivery-tables \
 #### 第三步：生成完整反馈报告
 
 ```bash
-curl -X POST http://127.0.0.1:8001/generate-report \
+curl -X POST http://127.0.0.1:8000/generate-report \
   -H "Content-Type: application/json" \
   -d '{"recordId":"你的记录ID"}'
 ```
@@ -265,7 +295,7 @@ curl -X POST http://127.0.0.1:8001/generate-report \
 #### 第四步：检查完成后归档原始文件
 
 ```bash
-curl -X POST http://127.0.0.1:8001/finalize-report \
+curl -X POST http://127.0.0.1:8000/finalize-report \
   -H "Content-Type: application/json" \
   -d '{"recordId":"你的记录ID"}'
 ```
@@ -277,7 +307,7 @@ curl -X POST http://127.0.0.1:8001/finalize-report \
 如果启动服务前设置了 `REPORT_SERVICE_SECRET`，每次请求都要传相同的 `secret`：
 
 ```bash
-curl -X POST http://127.0.0.1:8001/generate-report \
+curl -X POST http://127.0.0.1:8000/generate-report \
   -H "Content-Type: application/json" \
   -d '{"recordId":"你的记录ID","secret":"你的服务密钥"}'
 ```
@@ -331,7 +361,7 @@ python -m scripts.reporting.generate_report \
 
 未传 `--output-dir` 时，本地命令行生成结果默认写入 `product-feedback-report/outputs/`。
 
-## 4. 可选：设置服务密钥
+## 6. 可选：设置服务密钥
 
 服务支持通过环境变量设置请求密钥：
 
@@ -350,7 +380,7 @@ export REPORT_SERVICE_SECRET="请替换为安全的随机字符串"
 
 如果使用 ngrok 将服务暴露到公网，强烈建议设置密钥。
 
-## 5. 私密配置与内部资源
+## 7. 私密配置与内部资源
 
 以下内容不应提交到公开仓库：
 
@@ -380,12 +410,18 @@ git diff --cached
 pip install -r requirements.txt
 ```
 
-### 端口已被占用
+### 8000 端口已被占用
 
-为第二个服务更换端口，例如：
+先检查是否已有 Gateway 在运行：
 
 ```bash
-uvicorn service.app:app --host 0.0.0.0 --port 8001
+curl http://127.0.0.1:8000/health
+```
+
+如果能够返回 `weeklyRoot` 和 `feedbackRoot`，直接使用现有 Gateway，不要重复启动。需要停止当前终端中的服务时按 `Control + C`，然后重新运行：
+
+```bash
+uvicorn gateway.app:app --host 0.0.0.0 --port 8000
 ```
 
 ### PNG 无法生成
