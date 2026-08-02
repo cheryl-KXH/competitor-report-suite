@@ -287,6 +287,26 @@ def tracked_product_statuses(
     return statuses
 
 
+def product_menu_launch_dates(
+    rows: list[AnnotationRow], brand: str
+) -> dict[str, date]:
+    """Collect NEW badge dates from the Auto/Adjusted product menu."""
+    dates_by_key: dict[str, date] = {}
+    names_by_key: dict[str, str] = {}
+    for row in rows:
+        if not row.recent_launch_date or (row.brand and row.brand != brand):
+            continue
+        key = normalize_product_key(row.product)
+        if not key:
+            continue
+        dates_by_key.setdefault(key, row.recent_launch_date)
+        names_by_key.setdefault(key, row.product)
+    return {
+        names_by_key[key]: launch_date
+        for key, launch_date in dates_by_key.items()
+    }
+
+
 def _annotation_lookup(rows: list[AnnotationRow]) -> dict[tuple[str, str, str], AnnotationRow]:
     return {(_platform_group(row.platform), row.brand, row.product): row for row in rows}
 
@@ -399,7 +419,7 @@ def platform_delivery_metrics(
     for row in _latest_store_product_rows(
         raw_rows,
         platform_name,
-        same_date_mode="all",
+        same_date_mode="sum",
     ):
         data = grouped[(row.brand, row.product)]
         data["sales"] += row.monthly_sales

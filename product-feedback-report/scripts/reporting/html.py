@@ -655,16 +655,44 @@ def _tracked_store_note(
     return f"。其中，{'；'.join(clauses)}。"
 
 
+def _new_product_badge_html(
+    product: str,
+    new_product_dates: dict[str, date] | None,
+) -> str:
+    """Return the NEW badge for a non-tracked product with a menu launch date."""
+    if not new_product_dates:
+        return ""
+    launch_date_lookup = {
+        normalize_product_key(name): value
+        for name, value in new_product_dates.items()
+        if value
+    }
+    launch_date = launch_date_lookup.get(normalize_product_key(product))
+    if not launch_date:
+        return ""
+    return (
+        ' <span class="new-product-badge">'
+        f"{launch_date.month}.{launch_date.day} NEW"
+        "</span>"
+    )
+
+
 def _delivery_html(
     brand: str,
     delivery: DeliveryReport,
     tracked_products: list[str],
+    new_product_dates: dict[str, date] | None = None,
 ) -> str:
     rows = []
     for row in delivery.display_rows:
         class_name = ' class="tracked-row"' if row.tracked else ""
+        new_badge = (
+            ""
+            if row.tracked
+            else _new_product_badge_html(row.product, new_product_dates)
+        )
         rows.append(
-            f"<tr{class_name}><td>{_escape(row.product)}</td>"
+            f"<tr{class_name}><td>{_escape(row.product)}{new_badge}</td>"
             f"<td>{_format_daily(row.meituan_daily)}</td><td>{_format_daily(row.eleme_daily)}</td>"
             f"<td>{_format_daily(row.combined_daily)}</td><td>{_format_percent(row.share)}</td>"
             f'<td class="rank-cell">{row.rank}</td></tr>'
@@ -695,6 +723,7 @@ def _jd_html(
     rows: tuple[JdSale, ...],
     total_sales: float,
     tracked_products: list[str],
+    new_product_dates: dict[str, date] | None = None,
 ) -> str:
     if not rows:
         return f'<p class="jd-missing-note">{_escape(brand)}京东外卖销售数据暂无法获取。</p>'
@@ -705,9 +734,16 @@ def _jd_html(
         product_key = normalize_product_key(row.product)
         if row.rank > 20 and product_key not in tracked_keys:
             continue
-        class_name = ' class="tracked-row"' if product_key in tracked_keys else ""
+        is_tracked = product_key in tracked_keys
+        class_name = ' class="tracked-row"' if is_tracked else ""
+        new_badge = (
+            ""
+            if is_tracked
+            else _new_product_badge_html(row.product, new_product_dates)
+        )
         body_rows.append(
-            f'<tr{class_name}><td class="rank-cell">{row.rank}</td><td>{_escape(row.product)}</td>'
+            f'<tr{class_name}><td class="rank-cell">{row.rank}</td>'
+            f'<td>{_escape(row.product)}{new_badge}</td>'
             f"<td>{_format_count(row.total_sales)}</td><td>{_format_percent(row.share)}</td></tr>"
         )
     body = "".join(body_rows)
@@ -977,9 +1013,11 @@ def build_report_html(
     jd_report: tuple[tuple[JdSale, ...], float] | None = None,
     social_report_models: dict[str, SocialReport] | None = None,
     delivery_statuses: dict[str, str] | None = None,
+    new_product_dates: dict[str, date] | None = None,
 ) -> ReportBuildResult:
     warnings: list[str] = []
     delivery_statuses = delivery_statuses or {}
+    new_product_dates = new_product_dates or {}
     if delivery_report is None:
         if not meituan_path or not eleme_path:
             raise RuntimeError("生成报告缺少美团或饿了么数据。")
@@ -1060,7 +1098,7 @@ def build_report_html(
         delivery_status = delivery_statuses.get(product)
         if delivery_status:
             intro_rows.append(
-                f'<li><strong>{_escape(product)}</strong>：{_escape(delivery_status)}，暂无月销数据。</li>'
+                f'<li><strong>{_escape(product)}</strong>：{_escape(delivery_status)}，暂无月销数据</li>'
             )
             continue
         sale = delivery.tracked_rows.get(product)
@@ -1099,6 +1137,7 @@ caption{{font-weight:700;font-size:{tables.get('fontSizePx',13.33)}px;line-heigh
 th,td{{border:{border_width}px solid #{colors.get('black','000000')};padding:{tables.get('cellPaddingVerticalPx',0)}px {tables.get('cellPaddingHorizontalPx',6)}px;text-align:center;vertical-align:middle;word-break:normal;overflow-wrap:normal}}
 thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colors.get('headerFill','D9D9D9')};font-weight:700}}
 .tracked-row td{{background:#{colors.get('trackedFill','FCE4D6')}}}.total-row>*{{font-weight:700;background:#{colors.get('headerFill','D9D9D9')}}}
+.new-product-badge{{display:inline-block;color:#{colors.get('newBadge','F28C28')};font-size:{fonts.get('newBadgeSizePx',10.67)}px;line-height:1;font-weight:700;white-space:nowrap;vertical-align:baseline}}
 .sales-table .product-column{{width:44%}}.sales-table .platform-column,.sales-table .combined-column,.sales-table .share-column{{width:12.5%}}.sales-table .rank-column{{width:6%}}
 .sales-table tbody td:first-child{{white-space:nowrap;word-break:keep-all}}
 .jd-table .rank-column{{width:7%}}.jd-table .product-column{{width:59%}}.jd-table .sales-column{{width:20%}}.jd-table .share-column{{width:14%}}.jd-table tbody td:nth-child(2){{white-space:nowrap;word-break:keep-all}}
@@ -1126,8 +1165,8 @@ thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colo
 <body><div class="report-viewport"><div class="report-scale"><main class="report">{logo_html}<h1>{_escape(title_text)}</h1>
 <div class="pdf-keep-together report-intro-module"><p class="lead"><strong>以下是{_escape(brand)} {launch_text}新品30日销量表现及消费者评论情况：</strong></p>
 <ul class="sales-summary">{''.join(intro_rows)}</ul></div>
-<div class="pdf-keep-together sales-module">{_delivery_html(brand, delivery, ordered_products)}</div>
-<div class="pdf-keep-together jd-module">{_jd_html(brand, jd_rows, jd_total, ordered_products)}</div>{''.join(product_sections)}
+<div class="pdf-keep-together sales-module">{_delivery_html(brand, delivery, ordered_products, new_product_dates)}</div>
+<div class="pdf-keep-together jd-module">{_jd_html(brand, jd_rows, jd_total, ordered_products, new_product_dates)}</div>{''.join(product_sections)}
 </main></div></div>{mobile_zoom_script}</body></html>"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")

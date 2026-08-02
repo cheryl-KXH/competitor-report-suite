@@ -26,6 +26,7 @@ from scripts.delivery.processing import (
     find_delivery_rows,
     jd_delivery_metrics,
     platform_delivery_metrics,
+    product_menu_launch_dates,
     read_annotation,
     tracked_product_statuses,
 )
@@ -1298,6 +1299,7 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
             current_stage = "生成数表"
             progress_callback("4/6 正在进行外卖及社媒数据统计")
             annotations = read_annotation(annotation_path)
+            new_product_dates = product_menu_launch_dates(annotations, brand)
             delivery_statuses = tracked_product_statuses(
                 annotations, brand, grouped_products
             )
@@ -1374,6 +1376,7 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
                 report_date=report_date,
                 social_paths={},
                 launch_dates=launch_dates,
+                new_product_dates=new_product_dates,
                 delivery_statuses=delivery_statuses,
                 configs=configs,
                 delivery_report=delivery_model,

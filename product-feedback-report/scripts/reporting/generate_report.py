@@ -189,6 +189,7 @@ def generate_report(
     jd_path: Path | None = None,
     social_paths: dict[str, Path] | None = None,
     launch_dates: dict[str, date | None] | None = None,
+    new_product_dates: dict[str, date] | None = None,
     delivery_statuses: dict[str, str] | None = None,
     output_dir: Path | None = None,
     configs: dict[str, dict[str, Any]] | None = None,
@@ -198,6 +199,7 @@ def generate_report(
 ) -> ReportBuildResult:
     configs = configs or load_configs()
     launch_dates = launch_dates or {}
+    new_product_dates = new_product_dates or {}
     delivery_statuses = delivery_statuses or {}
     social_paths = social_paths or {}
     product_warnings: list[str] = []
@@ -221,6 +223,7 @@ def generate_report(
         social_paths=social_paths,
         product_infos=product_infos,
         launch_dates=launch_dates,
+        new_product_dates=new_product_dates,
         delivery_statuses=delivery_statuses,
         output_path=out_dir / filename,
         configs=configs,
