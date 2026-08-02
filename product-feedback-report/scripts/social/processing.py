@@ -18,6 +18,8 @@ SOCIAL_RAW_PLATFORMS = (
     ("douyin", "抖音"),
     ("bilibili", "B站"),
 )
+
+
 @dataclass(frozen=True)
 class PlatformSummary:
     key: str
@@ -49,6 +51,23 @@ def _header_index(header: list[Any], name: str) -> int | None:
     return next((index for index, value in enumerate(normalized) if value == target), None)
 
 
+def _reset_read_only_dimensions(workbook) -> None:
+    """Ignore unreliable worksheet dimension metadata from third-party exports."""
+    for worksheet in workbook.worksheets:
+        reset_dimensions = getattr(worksheet, "reset_dimensions", None)
+        if reset_dimensions is not None:
+            reset_dimensions()
+
+
+def _is_no_data_rows(rows: Iterable[Iterable[Any]]) -> bool:
+    values = [list(row) for row in rows]
+    return not any(
+        _text(value)
+        for row in values[1:]
+        for value in row
+    )
+
+
 def normalize_social_product_key(value: Any) -> str:
     """Normalize product labels without allowing fuzzy/substring matching."""
     text = unicodedata.normalize("NFKC", _text(value)).casefold()
@@ -59,15 +78,17 @@ def social_workbook_products(path: Path) -> dict[str, str]:
     """Return normalized product keys and their first source labels."""
     workbook = load_workbook(path, read_only=True, data_only=False)
     try:
+        _reset_read_only_dimensions(workbook)
         worksheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
-        header = [cell.value for cell in worksheet[1]]
+        values = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        header = values[0] if values else []
         product_index = _header_index(header, "产品名称")
         if product_index is None:
             raise RuntimeError(f"社媒文件缺少“产品名称”列：{path.name}")
 
         products: dict[str, str] = {}
         for row_number, row in enumerate(
-            worksheet.iter_rows(min_row=2, values_only=True), start=2
+            values[1:], start=2
         ):
             if not any(_text(value) for value in row):
                 continue
@@ -90,6 +111,7 @@ def social_cleaned_workbook_products(path: Path) -> dict[str, str]:
     """Return products found across the four raw-data sheets in a cleaned workbook."""
     workbook = load_workbook(path, read_only=True, data_only=False)
     try:
+        _reset_read_only_dimensions(workbook)
         products: dict[str, str] = {}
         missing_sheets = [label for _, label in SOCIAL_RAW_PLATFORMS if label not in workbook.sheetnames]
         if missing_sheets:
@@ -98,14 +120,17 @@ def social_cleaned_workbook_products(path: Path) -> dict[str, str]:
             )
         for _, label in SOCIAL_RAW_PLATFORMS:
             worksheet = workbook[label]
-            header = [cell.value for cell in worksheet[1]]
+            values = [list(row) for row in worksheet.iter_rows(values_only=True)]
+            if _is_no_data_rows(values):
+                continue
+            header = values[0] if values else []
             product_index = _header_index(header, "产品名称")
             if product_index is None:
                 raise RuntimeError(
                     f"社媒清洗数据的“{label}”工作表缺少“产品名称”列：{path.name}"
                 )
             for row_number, row in enumerate(
-                worksheet.iter_rows(min_row=2, values_only=True), start=2
+                values[1:], start=2
             ):
                 if not any(_text(value) for value in row):
                     continue
@@ -170,7 +195,7 @@ def split_social_workbook(
 
 def summarize_social_rows(key: str, label: str, rows: Iterable[Iterable[Any]]) -> PlatformSummary:
     values = [list(row) for row in rows]
-    if not values:
+    if _is_no_data_rows(values):
         return PlatformSummary(key, label, (), (), 0, 0)
     header = values[0]
     sentiment_index = _header_index(header, "情感识别")
@@ -218,6 +243,7 @@ def summarize_social_rows(key: str, label: str, rows: Iterable[Iterable[Any]]) -
 def summarize_social_file(key: str, label: str, path: Path) -> PlatformSummary:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
+        _reset_read_only_dimensions(workbook)
         worksheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
         return summarize_social_rows(key, label, worksheet.iter_rows(values_only=True))
     finally:
@@ -241,6 +267,8 @@ def _count_value(value: Any, *, label: str) -> int:
 
 def summarize_dianping_rows(rows: Iterable[Iterable[Any]]) -> PlatformSummary:
     values = [list(row) for row in rows]
+    if _is_no_data_rows(values):
+        return PlatformSummary("dianping", "大众点评", (), (), 0, 0)
     header_row = None
     indexes: tuple[int, int, int, int] | None = None
     for row_number, row in enumerate(values):
@@ -313,6 +341,7 @@ def summarize_social_cleaned_workbook(path: Path) -> list[PlatformSummary]:
     """Read the prepared Dianping table and four raw-platform sheets from one workbook."""
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
+        _reset_read_only_dimensions(workbook)
         required_sheets = ["大众点评", *(label for _, label in SOCIAL_RAW_PLATFORMS)]
         missing_sheets = [name for name in required_sheets if name not in workbook.sheetnames]
         if missing_sheets:

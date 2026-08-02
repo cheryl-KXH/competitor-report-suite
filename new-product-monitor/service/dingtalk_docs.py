@@ -199,49 +199,40 @@ def ensure_report_folder(config: dict[str, Any], business: str, year: int | str,
     return ensure_child_folder(config, year_id, report_stem)
 
 
-def delete_child_folder_if_exists(config: dict[str, Any], parent_id: str, name: str) -> None:
-    existing = find_child_by_name(config, parent_id, name)
-    if not existing:
-        return
-    node_id = _node_id(existing)
-    if not node_id:
-        raise RuntimeError(f"找到同名文件夹但未获取到节点 ID：{name}")
-    call_docs_tool(config, "delete_document", {"nodeId": node_id})
-    for _ in range(10):
-        if not find_child_by_name(config, parent_id, name):
-            return
-        time.sleep(0.5)
-    raise RuntimeError(f"删除旧周报文件夹后仍能查询到同名文件夹：{name}")
+def _node_filename(node: dict[str, Any]) -> str:
+    name = _node_name(node)
+    extension = str(node.get("extension") or "").strip().lstrip(".")
+    if extension and not name.lower().endswith(f".{extension.lower()}"):
+        return f"{name}.{extension}"
+    return name
 
 
-def replace_report_folder(config: dict[str, Any], business: str, year: int | str, report_stem: str) -> tuple[str, str]:
-    root_id, _ = ensure_business_root(config, business)
-    year_id, _ = ensure_child_folder(config, root_id, normalize_year_folder_name(year))
-    delete_child_folder_if_exists(config, year_id, report_stem)
-    return ensure_child_folder(config, year_id, report_stem)
-
-
-def delete_named_children(config: dict[str, Any], folder_id: str, names: set[str]) -> None:
-    for node in list_nodes(config, folder_id):
-        if _node_name(node) not in names:
-            continue
-        node_id = _node_id(node)
-        if node_id:
-            call_docs_tool(config, "delete_document", {"nodeId": node_id})
-
-
-def delete_report_file_variants(config: dict[str, Any], folder_id: str, paths: list[Path]) -> None:
-    patterns = [
+def _report_file_patterns(paths: list[Path]) -> list[re.Pattern[str]]:
+    return [
         re.compile(rf"^{re.escape(path.stem)}(?:\(\d+\))?{re.escape(path.suffix)}$")
         for path in paths
     ]
+
+
+def _matches_report_file(node: dict[str, Any], patterns: list[re.Pattern[str]]) -> bool:
+    return any(pattern.match(_node_filename(node)) for pattern in patterns)
+
+
+def delete_report_file_variants(config: dict[str, Any], folder_id: str, paths: list[Path]) -> None:
+    patterns = _report_file_patterns(paths)
     for node in list_nodes(config, folder_id):
-        name = _node_name(node)
-        if not any(pattern.match(name) for pattern in patterns):
+        if not _matches_report_file(node, patterns):
             continue
         node_id = _node_id(node)
         if node_id:
+            temporary_name = f"待删除-{int(time.time())}-{node_id[:8]}"
+            call_docs_tool(config, "rename_document", {"nodeId": node_id, "newName": temporary_name})
             call_docs_tool(config, "delete_document", {"nodeId": node_id})
+    for _ in range(10):
+        if not any(_matches_report_file(node, patterns) for node in list_nodes(config, folder_id)):
+            return
+        time.sleep(0.5)
+    raise RuntimeError("旧周报文件仍未清理完成，已停止上传以避免生成 (1) 重名文件")
 
 
 def _upload_info_value(data: Any, *keys: str) -> Any:
@@ -303,9 +294,10 @@ def upload_report_directory(
     paths: list[Path],
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
-    folder_id, folder_url = replace_report_folder(config, business, year, report_stem)
+    folder_id, folder_url = ensure_report_folder(config, business, year, report_stem)
     if progress_callback:
         progress_callback("5/5 正在上传至钉钉文档")
+    delete_report_file_variants(config, folder_id, paths)
     for path in paths:
         started_at = time.perf_counter()
         upload_file(config, folder_id, path)

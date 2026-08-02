@@ -33,8 +33,14 @@
       "required": true
     },
     "productMenu": {
-      "label": "产品清单及上新日期",
+      "label": "产品清单Adjusted（仅用于人工调整后回传）",
       "fieldId": "YnLeVwN",
+      "cellType": "attachment",
+      "required": false
+    },
+    "productMenuAuto": {
+      "label": "产品清单Auto",
+      "fieldId": "IprGCFU",
       "cellType": "attachment",
       "required": false
     },

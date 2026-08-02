@@ -28,8 +28,17 @@ def sale(
     monthly_sales: float,
     crawl_date: date,
     brand: str = "品牌A",
+    category: str = "",
 ) -> RawSaleRow:
-    return RawSaleRow(platform, brand, store, "", product, monthly_sales, crawl_date)
+    return RawSaleRow(
+        platform,
+        brand,
+        store,
+        category,
+        product,
+        monthly_sales,
+        crawl_date,
+    )
 
 
 def annotation(
@@ -81,6 +90,20 @@ class DeliveryStatisticsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "日期标注.*无效"):
                 read_annotation(path)
 
+    def test_product_menu_reads_excel_serial_date_without_date_cell_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "人工产品清单.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["平台", "品牌", "产品", "近30日上新日期"])
+            sheet.append(["美团", "霸王茶姬", "轻因·糯青山柠檬奶", 46191])
+            workbook.save(path)
+
+            annotations = read_annotation(path)
+
+        self.assertEqual(len(annotations), 1)
+        self.assertEqual(annotations[0].recent_launch_date, date(2026, 6, 18))
+
     def test_product_menu_rejects_old_32_day_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "旧产品清单.xlsx"
@@ -91,11 +114,25 @@ class DeliveryStatisticsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "缺少字段.*近30日上新日期"):
                 read_annotation(path)
 
-    def test_meituan_uses_latest_rows_and_sums_store_sale_days(self) -> None:
+    def test_meituan_uses_latest_date_and_sums_same_day_rows(self) -> None:
         rows = [
             sale("美团", "门店1", "产品A", 999, date(2026, 7, 9)),
-            sale("美团", "门店1", "产品A", 80, date(2026, 7, 10)),
-            sale("美团", "门店1", "产品A", 90, date(2026, 7, 10)),
+            sale(
+                "美团",
+                "门店1",
+                "产品A",
+                80,
+                date(2026, 7, 10),
+                category="新品专区",
+            ),
+            sale(
+                "美团",
+                "门店1",
+                "产品A",
+                90,
+                date(2026, 7, 10),
+                category="热卖专区",
+            ),
             sale("美团", "门店2", "产品A", 0, date(2026, 7, 12)),
             sale("美团", "门店1", "产品B", 45, date(2026, 7, 12)),
             sale("美团", "门店2", "产品B", 45, date(2026, 7, 12)),
@@ -113,8 +150,12 @@ class DeliveryStatisticsTests(unittest.TestCase):
             values[0],
             ("排名", "商品名称", "日店均销量", "总销量", "总销量占比", "总在售天数", "在售门店数", "在售天数", "上新日期"),
         )
-        self.assertEqual(values[1], (1, "产品A", 6.4286, 90, 0.5, 14, 2, 8, datetime(2026, 7, 5)))
-        self.assertEqual(values[2], (1, "产品B", 1.5, 90, 0.5, 60, 2, 30, None))
+        self.assertEqual(values[1][:4], (1, "产品A", 8.5, 170))
+        self.assertAlmostEqual(values[1][4], 170 / 260)
+        self.assertEqual(values[1][5:], (20, 3, 8, datetime(2026, 7, 5)))
+        self.assertEqual(values[2][:4], (2, "产品B", 1.5, 90))
+        self.assertAlmostEqual(values[2][4], 90 / 260)
+        self.assertEqual(values[2][5:], (60, 2, 30, None))
 
     def test_sale_days_boundaries_and_exact_annotation_key(self) -> None:
         lookup = _annotation_lookup(
@@ -203,6 +244,51 @@ class DeliveryStatisticsTests(unittest.TestCase):
         self.assertEqual(values[2], (1, "产品B", 100, 1, 100, 0.5, 30, None))
         self.assertEqual(values[3], (3, "产品C", 0, 1, 0, 0, 30, None))
         self.assertEqual(share_format, "0.00%")
+
+    def test_jd_sums_same_day_product_slots_before_averaging(self) -> None:
+        rows = [
+            sale(
+                "京东秒送",
+                "门店1",
+                "西瓜啵啵",
+                500000,
+                date(2026, 7, 10),
+                category="夏日吃瓜",
+            ),
+            sale(
+                "京东秒送",
+                "门店1",
+                "西瓜啵啵",
+                100,
+                date(2026, 7, 10),
+                category="热卖专区",
+            ),
+            sale(
+                "京东秒送",
+                "门店2",
+                "西瓜啵啵",
+                100,
+                date(2026, 7, 10),
+                category="热卖专区",
+            ),
+            sale(
+                "京东秒送",
+                "门店2",
+                "西瓜啵啵",
+                500000,
+                date(2026, 7, 10),
+                category="夏日吃瓜",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "京东.xlsx"
+            generate_jd_summary(rows, [], output)
+            values = list(load_workbook(output, data_only=True).active.values)
+
+        self.assertEqual(
+            values[1],
+            (1, "西瓜啵啵", 1000200, 2, 500100, 1, 30, None),
+        )
 
     def test_empty_platform_creates_header_only_workbook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -340,7 +340,9 @@ def mcporter_selector(dingtalk_cfg: dict[str, Any], tool_name: str) -> list[str]
 def call_dingtalk_tool(dingtalk_cfg: dict[str, Any], tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     cmd = mcporter_selector(dingtalk_cfg, tool_name) + ["--args", json.dumps(payload, ensure_ascii=False)]
     retryable_tools = {"query_records", "update_records"}
-    max_attempts = 3 if tool_name in retryable_tools else 1
+    default_max_attempts = 3 if tool_name in retryable_tools else 1
+    calc_not_ready_max_attempts = 6
+    max_attempts = calc_not_ready_max_attempts if tool_name in retryable_tools else default_max_attempts
     for attempt in range(1, max_attempts + 1):
         try:
             result = subprocess.run(cmd, check=False, capture_output=True, text=True)
@@ -358,16 +360,32 @@ def call_dingtalk_tool(dingtalk_cfg: dict[str, Any], tool_name: str, payload: di
         if not failed:
             return data
 
-        code = str(data.get("code") or "").strip()
-        message = str(data.get("message") or data.get("error") or "未知错误").strip()
-        retryable = tool_name in retryable_tools and bool(data.get("retryable"))
-        if retryable and attempt < max_attempts:
+        error = data.get("error")
+        error_detail = error if isinstance(error, dict) else {}
+        code = str(data.get("code") or error_detail.get("code") or "").strip()
+        message = str(
+            data.get("message")
+            or error_detail.get("message")
+            or (error if not isinstance(error, dict) else "")
+            or "未知错误"
+        ).strip()
+        retryable_flag = data.get("retryable")
+        if retryable_flag is None:
+            retryable_flag = error_detail.get("retryable")
+        retryable = tool_name in retryable_tools and bool(retryable_flag)
+        attempt_limit = (
+            calc_not_ready_max_attempts
+            if code == "InvalidRequest.DataNotReady"
+            else default_max_attempts
+        )
+        if retryable and attempt < attempt_limit:
             operation = "只读查询" if tool_name == "query_records" else "幂等字段更新"
             print(
-                f"WARNING: 钉钉{operation}失败，第 {attempt}/{max_attempts} 次，稍后重试：{code or message}",
+                f"WARNING: 钉钉{operation}失败，第 {attempt}/{attempt_limit} 次，稍后重试：{code or message}",
                 file=sys.stderr,
             )
-            time.sleep(float(attempt))
+            delay = min(float(2 ** (attempt - 1)), 10.0) if code == "InvalidRequest.DataNotReady" else float(attempt)
+            time.sleep(delay)
             continue
         detail = f"{code}: {message}" if code else message
         raise RuntimeError(f"钉钉工具返回失败：{detail}")
@@ -1107,7 +1125,10 @@ def estimate_summary_row_height(
     wrap_columns = set(auto_fit.get("summaryWrapColumns", ["G", "H"]))
     line_counts = [1]
     if "G" in wrap_columns:
-        line_counts.append(estimate_line_count(price_display, column_widths.get("G", 19.0), factor))
+        # Price cells only wrap at the explicit line breaks inserted after `/`.
+        # Estimating an additional wrap here makes visually single-line prices
+        # such as `12.9元(16元)` unnecessarily tall.
+        line_counts.append(max(1, str(price_display or "").count("\n") + 1))
     if "H" in wrap_columns:
         line_counts.append(estimate_line_count(record.remark, column_widths.get("H", 12.0), factor))
     max_lines = max(line_counts)

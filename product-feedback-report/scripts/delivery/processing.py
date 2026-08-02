@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
@@ -69,6 +70,15 @@ def parse_date(value: Any) -> date | None:
             return datetime.strptime(digits, "%Y%m%d").date()
         except ValueError:
             return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            excel_date = from_excel(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if isinstance(excel_date, datetime):
+            return excel_date.date()
+        if isinstance(excel_date, date):
+            return excel_date
     return None
 
 
@@ -291,8 +301,15 @@ def _platform_group(platform: str) -> str:
     return platform
 
 
-def _latest_store_product_rows(raw_rows: list[RawSaleRow], platform_name: str) -> list[RawSaleRow]:
-    latest: dict[tuple[str, str, str, str], RawSaleRow] = {}
+def _latest_store_product_rows(
+    raw_rows: list[RawSaleRow],
+    platform_name: str,
+    *,
+    same_date_mode: str = "last",
+) -> list[RawSaleRow]:
+    if same_date_mode not in {"last", "all", "sum"}:
+        raise ValueError(f"不支持的同日记录处理方式：{same_date_mode}")
+    latest: dict[tuple[str, str, str, str], list[RawSaleRow]] = {}
     for row in raw_rows:
         platform = _platform_group(row.platform)
         if platform != platform_name:
@@ -302,10 +319,32 @@ def _latest_store_product_rows(raw_rows: list[RawSaleRow], platform_name: str) -
                 f"{platform_name}外卖数据缺少门店名称：品牌={row.brand}，产品={row.product}，抓取日期={row.crawl_date:%Y-%m-%d}"
             )
         key = (platform, row.brand, row.store, row.product)
-        previous = latest.get(key)
-        if previous is None or row.crawl_date >= previous.crawl_date:
-            latest[key] = row
-    return list(latest.values())
+        previous_rows = latest.get(key)
+        previous = previous_rows[0] if previous_rows else None
+        if previous is None or row.crawl_date > previous.crawl_date:
+            latest[key] = [row]
+        elif row.crawl_date == previous.crawl_date:
+            if same_date_mode == "all":
+                previous_rows.append(row)
+            elif same_date_mode == "sum":
+                latest[key] = [
+                    RawSaleRow(
+                    platform=row.platform,
+                    brand=row.brand,
+                    store=row.store,
+                    category=row.category,
+                    product=row.product,
+                    monthly_sales=previous.monthly_sales + row.monthly_sales,
+                    crawl_date=row.crawl_date,
+                    )
+                ]
+            else:
+                latest[key] = [row]
+    return [
+        row
+        for rows in latest.values()
+        for row in rows
+    ]
 
 
 def _store_sale_days(row: RawSaleRow, lookup: dict[tuple[str, str, str], AnnotationRow]) -> int:
@@ -357,7 +396,11 @@ def platform_delivery_metrics(
     grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
         lambda: {"sales": 0.0, "sale_days": 0, "stores": 0, "crawl_date": None}
     )
-    for row in _latest_store_product_rows(raw_rows, platform_name):
+    for row in _latest_store_product_rows(
+        raw_rows,
+        platform_name,
+        same_date_mode="all",
+    ):
         data = grouped[(row.brand, row.product)]
         data["sales"] += row.monthly_sales
         data["sale_days"] += _store_sale_days(row, lookup)
@@ -403,7 +446,11 @@ def jd_delivery_metrics(
     grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
         lambda: {"sales_sum": 0.0, "stores": 0, "crawl_date": None}
     )
-    for row in _latest_store_product_rows(raw_rows, "京东"):
+    for row in _latest_store_product_rows(
+        raw_rows,
+        "京东",
+        same_date_mode="sum",
+    ):
         data = grouped[(row.brand, row.product)]
         data["sales_sum"] += row.monthly_sales
         data["stores"] += 1

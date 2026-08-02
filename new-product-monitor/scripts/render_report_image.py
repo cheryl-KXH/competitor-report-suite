@@ -408,8 +408,7 @@ def build_summary_html(records: list[ReportRecord], brands: list[str], layout: d
         row_count = len(brand_records)
         for index, record in enumerate(brand_records):
             launch = f"{record.launch_date.month}月{record.launch_date.day}日" if record.launch_date else ""
-            line_count = min(5, summary_line_count(record, columns, layout))
-            row = [f'<tr class="line-count-{line_count}">']
+            row = ["<tr>"]
             if index == 0:
                 row.append(f'<td class="brand-cell" rowspan="{row_count}">{render_brand_html(brand, force_space_break=True)}</td>')
                 row.append(f'<td class="count-cell" rowspan="{row_count}">{row_count}</td>')
@@ -504,10 +503,10 @@ def build_html_document(
     page_width = max(int(page["widthPx"]), summary_width + page_margin)
     detail_table_width = max(int(details["tableWidthPx"]), summary_width)
     label_width = summary_columns["brand"]
-    row_heights = image_layout.get("summary", {}).get("rowHeightByLineCountPx", {})
-    row_height_css = "\n".join(
-        f".summary-table tr.line-count-{count} > td {{ height: {height}px; }}"
-        for count, height in row_heights.items()
+    summary_config = image_layout.get("summary", {})
+    legacy_row_heights = summary_config.get("rowHeightByLineCountPx", {})
+    summary_row_height = int(
+        summary_config.get("rowHeightPx", legacy_row_heights.get("1", 20))
     )
     font_css = font_face_css(configs, image_layout)
     font_family = html_font_family(configs, image_layout)
@@ -547,6 +546,7 @@ table {{ border-collapse: collapse; table-layout: fixed; margin-left: auto; marg
 th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center; vertical-align: middle; padding: 2px 4px; word-break: break-word; }}
 .summary-table {{ width: {summary_width}px; margin-bottom: 2px; }}
 .summary-table th, .summary-table td {{ padding: 1px 3px; line-height: 1.35; }}
+.summary-table tbody > tr > td {{ height: {summary_row_height}px; }}
 .summary-table th {{ background: #{colors['headerFill']}; font-weight: 700; }}
 .summary-header > th {{ height: {image_layout['summary'].get('headerHeightPx', 58)}px; }}
 .summary-header > th:nth-child(2) {{ white-space: nowrap; word-break: keep-all; }}
@@ -586,7 +586,6 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
   .report {{ margin: 0; }}
   th, td {{ border-width: 1.5px; }}
 }}
-{row_height_css}
 """
     mobile_zoom_script = f"""
 <script>

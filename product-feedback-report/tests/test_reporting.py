@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+import re
 
 from openpyxl import Workbook
 
@@ -233,9 +234,9 @@ class ReportingTests(unittest.TestCase):
         self.assertIn(".source-note,.jd-note{font-size:13.33px", document)
         self.assertIn(".jd-missing-note{font-size:16px}", document)
         self.assertIn('class="product-column"><col class="platform-column"><col class="platform-column"', document)
-        self.assertIn(".sales-table .product-column{width:36%}", document)
+        self.assertIn(".sales-table .product-column{width:44%}", document)
         self.assertIn(
-            ".sales-table .platform-column,.sales-table .combined-column,.sales-table .share-column{width:14.5%}",
+            ".sales-table .platform-column,.sales-table .combined-column,.sales-table .share-column{width:12.5%}",
             document,
         )
         self.assertIn(".sales-table .rank-column{width:6%}", document)
@@ -356,6 +357,84 @@ class ReportingTests(unittest.TestCase):
         self.assertIn('好评（13 条）', summary)
         self.assertIn('差评（3 条）', summary)
         self.assertEqual(summary.count("<br>"), 2)
+
+    def test_multi_product_body_and_sections_follow_sales_rank(self) -> None:
+        products = ["低销量新品", "无销量新品", "高销量新品", "中销量新品"]
+        delivery = delivery_report_from_metrics(
+            [
+                {"product": "低销量新品", "daily_store_avg": 1, "sales": 20, "stores": 3},
+                {"product": "高销量新品", "daily_store_avg": 8, "sales": 300, "stores": 5},
+                {"product": "中销量新品", "daily_store_avg": 4, "sales": 100, "stores": 5},
+            ],
+            [
+                {"product": "低销量新品", "daily_store_avg": 1, "sales": 10, "stores": 4},
+                {"product": "高销量新品", "daily_store_avg": 6, "sales": 200, "stores": 6},
+                {"product": "中销量新品", "daily_store_avg": 3, "sales": 100, "stores": 6},
+            ],
+            products,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            expected_artifact_title = (
+                "品牌：低销量新品、无销量新品、高销量新品、中销量新品 20260718"
+            )
+            expected_page_title = (
+                "品牌：低销量新品、无销量新品、高销量新品、中销量新品"
+            )
+            output = Path(tmp) / f"{expected_artifact_title}.html"
+            build_report_html(
+                title="报告",
+                brand="品牌",
+                products=products,
+                report_date=date(2026, 7, 18),
+                meituan_path=None,
+                eleme_path=None,
+                jd_path=None,
+                social_paths={},
+                product_infos={
+                    product: ProductInfo(product)
+                    for product in products
+                },
+                launch_dates={
+                    product: date(2026, 6, 18)
+                    for product in products
+                },
+                output_path=output,
+                configs={"html_layout": {}, "font_files": {}},
+                delivery_report=delivery,
+                jd_report=jd_report_from_metrics([]),
+            )
+            document = output.read_text(encoding="utf-8")
+
+        intro = document.split('<ul class="sales-summary">', 1)[1].split("</ul>", 1)[0]
+        expected_order = ["高销量新品", "中销量新品", "低销量新品", "无销量新品"]
+        self.assertEqual(
+            re.findall(r"<strong>([^<]+)</strong>：", intro),
+            expected_order,
+        )
+        self.assertEqual(
+            re.findall(r'<span class="product-title-text">([^<]+)</span>', document),
+            expected_order,
+        )
+        self.assertIn(
+            f"<h1>{expected_page_title}</h1>",
+            document,
+        )
+        self.assertIn(
+            f"<title>{expected_page_title}</title>",
+            document,
+        )
+        self.assertEqual(output.stem, expected_artifact_title)
+        self.assertIn("<strong>高销量新品</strong>：销量排名第 1", intro)
+        self.assertIn("<strong>中销量新品</strong>：销量排名第 2", intro)
+        self.assertIn("<strong>低销量新品</strong>：销量排名第 3", intro)
+        self.assertIn("<strong>无销量新品</strong>：暂未匹配到外卖销售数据", intro)
+        self.assertIn(
+            "数据来源：根据品牌美团外卖 5 家店铺和饿了么外卖 6 家店铺月销数据计算。"
+            "其中，高销量新品、中销量新品美团&amp;饿了么所有门店均有售；"
+            "低销量新品美团在售门店 3 家，饿了么在售门店 4 家；"
+            "无销量新品美团在售门店 0 家，饿了么在售门店 0 家。",
+            document,
+        )
 
     def test_html_accepts_in_memory_statistics_without_intermediate_files(self) -> None:
         delivery = delivery_report_from_metrics(

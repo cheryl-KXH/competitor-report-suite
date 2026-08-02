@@ -48,6 +48,8 @@ class CombinedSale:
     product: str
     meituan_daily: float
     eleme_daily: float
+    meituan_stores: int
+    eleme_stores: int
     combined_daily: float
     total_sales: float
     share: float
@@ -279,19 +281,39 @@ def combine_delivery_models(
         + (eleme.get(key).total_sales if key in eleme else 0.0)
         for key in keys
     )
-    sortable: list[tuple[str, str, float, float, float, float]] = []
+    sortable: list[tuple[str, str, float, float, int, int, float, float]] = []
     for key in keys:
         mt = meituan.get(key)
         elm = eleme.get(key)
         mt_daily = mt.daily_store_avg if mt else 0.0
         elm_daily = elm.daily_store_avg if elm else 0.0
         combined_sales = (mt.total_sales if mt else 0.0) + (elm.total_sales if elm else 0.0)
-        sortable.append((key, names[key], mt_daily, elm_daily, mt_daily + elm_daily, combined_sales))
-    sortable.sort(key=lambda item: (-item[5], item[1]))
+        sortable.append(
+            (
+                key,
+                names[key],
+                mt_daily,
+                elm_daily,
+                mt.stores if mt else 0,
+                elm.stores if elm else 0,
+                mt_daily + elm_daily,
+                combined_sales,
+            )
+        )
+    sortable.sort(key=lambda item: (-item[7], item[1]))
     ranked: list[CombinedSale] = []
     previous_sales: float | None = None
     previous_rank = 0
-    for index, (key, product, mt_daily, elm_daily, combined_daily, combined_sales) in enumerate(sortable, 1):
+    for index, (
+        key,
+        product,
+        mt_daily,
+        elm_daily,
+        mt_stores,
+        elm_stores,
+        combined_daily,
+        combined_sales,
+    ) in enumerate(sortable, 1):
         rank = previous_rank if previous_sales is not None and combined_sales == previous_sales else index
         previous_sales = combined_sales
         previous_rank = rank
@@ -302,6 +324,8 @@ def combine_delivery_models(
                 product=product,
                 meituan_daily=mt_daily,
                 eleme_daily=elm_daily,
+                meituan_stores=mt_stores,
+                eleme_stores=elm_stores,
                 combined_daily=combined_daily,
                 total_sales=combined_sales,
                 share=combined_sales / total_sales if total_sales else 0.0,
@@ -597,7 +621,45 @@ def _price_html(value: str) -> str:
     )
 
 
-def _delivery_html(brand: str, delivery: DeliveryReport) -> str:
+def _tracked_store_note(
+    delivery: DeliveryReport,
+    tracked_products: list[str],
+) -> str:
+    if not tracked_products:
+        return ""
+    all_store_products: list[str] = []
+    partial_products: list[tuple[str, int, int]] = []
+    for product in tracked_products:
+        row = delivery.tracked_rows.get(product)
+        meituan_stores = row.meituan_stores if row else 0
+        eleme_stores = row.eleme_stores if row else 0
+        if (
+            delivery.meituan_stores > 0
+            and delivery.eleme_stores > 0
+            and meituan_stores == delivery.meituan_stores
+            and eleme_stores == delivery.eleme_stores
+        ):
+            all_store_products.append(product)
+        else:
+            partial_products.append((product, meituan_stores, eleme_stores))
+
+    clauses: list[str] = []
+    if all_store_products:
+        product_names = "、".join(_escape(product) for product in all_store_products)
+        clauses.append(f"{product_names}美团&amp;饿了么所有门店均有售")
+    clauses.extend(
+        f"{_escape(product)}美团在售门店 {_format_count(meituan_stores)} 家，"
+        f"饿了么在售门店 {_format_count(eleme_stores)} 家"
+        for product, meituan_stores, eleme_stores in partial_products
+    )
+    return f"。其中，{'；'.join(clauses)}。"
+
+
+def _delivery_html(
+    brand: str,
+    delivery: DeliveryReport,
+    tracked_products: list[str],
+) -> str:
     rows = []
     for row in delivery.display_rows:
         class_name = ' class="tracked-row"' if row.tracked else ""
@@ -624,7 +686,7 @@ def _delivery_html(brand: str, delivery: DeliveryReport) -> str:
 <tr><th>日店均销量</th><th>日店均销量</th><th>日店均销量</th><th>销量占比</th><th class="rank-header">排名</th></tr></thead>
 <tbody>{''.join(rows)}</tbody>
 </table></div>
-<p class="source-note">数据来源：根据{_escape(brand)}美团外卖 {_format_count(delivery.meituan_stores)} 家店铺和饿了么外卖 {_format_count(delivery.eleme_stores)} 家店铺月销数据计算</p>
+<p class="source-note">数据来源：根据{_escape(brand)}美团外卖 {_format_count(delivery.meituan_stores)} 家店铺和饿了么外卖 {_format_count(delivery.eleme_stores)} 家店铺月销数据计算{_tracked_store_note(delivery, tracked_products)}</p>
 """
 
 
@@ -924,6 +986,19 @@ def build_report_html(
         delivery = combine_delivery_sales(meituan_path, eleme_path, products)
     else:
         delivery = delivery_report
+    original_positions = {product: index for index, product in enumerate(products)}
+    ordered_products = sorted(
+        products,
+        key=lambda product: (
+            0 if product in delivery.tracked_rows else 1,
+            (
+                delivery.tracked_rows[product].rank
+                if product in delivery.tracked_rows
+                else float("inf")
+            ),
+            original_positions[product],
+        ),
+    )
     jd_rows, jd_total = jd_report or read_jd_sales(jd_path)
     social_reports: dict[str, SocialReport] = dict(social_report_models or {})
     for product, path in social_paths.items():
@@ -947,7 +1022,7 @@ def build_report_html(
         warnings.append("HTML 报告 Logo 不可访问，已使用纯文字标题")
 
     product_sections: list[str] = []
-    for product in products:
+    for product in ordered_products:
         info = product_infos.get(product)
         if not info:
             warnings.append(f"{product}：周报产品信息暂无法获取")
@@ -972,12 +1047,16 @@ def build_report_html(
             f'{_social_detail_html(social)}</section>'
         )
 
-    launch_values = [value for value in launch_dates.values() if value]
+    launch_values = [
+        launch_dates.get(product)
+        for product in ordered_products
+        if launch_dates.get(product)
+    ]
     launch_text = ""
     if launch_values and len(set(launch_values)) == 1:
         launch_text = f"{launch_values[0].month}.{launch_values[0].day} "
     intro_rows: list[str] = []
-    for product in products:
+    for product in ordered_products:
         delivery_status = delivery_statuses.get(product)
         if delivery_status:
             intro_rows.append(
@@ -1020,7 +1099,7 @@ caption{{font-weight:700;font-size:{tables.get('fontSizePx',13.33)}px;line-heigh
 th,td{{border:{border_width}px solid #{colors.get('black','000000')};padding:{tables.get('cellPaddingVerticalPx',0)}px {tables.get('cellPaddingHorizontalPx',6)}px;text-align:center;vertical-align:middle;word-break:normal;overflow-wrap:normal}}
 thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colors.get('headerFill','D9D9D9')};font-weight:700}}
 .tracked-row td{{background:#{colors.get('trackedFill','FCE4D6')}}}.total-row>*{{font-weight:700;background:#{colors.get('headerFill','D9D9D9')}}}
-.sales-table .product-column{{width:36%}}.sales-table .platform-column,.sales-table .combined-column,.sales-table .share-column{{width:14.5%}}.sales-table .rank-column{{width:6%}}
+.sales-table .product-column{{width:44%}}.sales-table .platform-column,.sales-table .combined-column,.sales-table .share-column{{width:12.5%}}.sales-table .rank-column{{width:6%}}
 .sales-table tbody td:first-child{{white-space:nowrap;word-break:keep-all}}
 .jd-table .rank-column{{width:7%}}.jd-table .product-column{{width:59%}}.jd-table .sales-column{{width:20%}}.jd-table .share-column{{width:14%}}.jd-table tbody td:nth-child(2){{white-space:nowrap;word-break:keep-all}}
 .rank-header,.rank-cell{{white-space:nowrap;word-break:keep-all;overflow-wrap:normal;padding-left:2px;padding-right:2px}}
@@ -1047,8 +1126,8 @@ thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colo
 <body><div class="report-viewport"><div class="report-scale"><main class="report">{logo_html}<h1>{_escape(title_text)}</h1>
 <div class="pdf-keep-together report-intro-module"><p class="lead"><strong>以下是{_escape(brand)} {launch_text}新品30日销量表现及消费者评论情况：</strong></p>
 <ul class="sales-summary">{''.join(intro_rows)}</ul></div>
-<div class="pdf-keep-together sales-module">{_delivery_html(brand, delivery)}</div>
-<div class="pdf-keep-together jd-module">{_jd_html(brand, jd_rows, jd_total, products)}</div>{''.join(product_sections)}
+<div class="pdf-keep-together sales-module">{_delivery_html(brand, delivery, ordered_products)}</div>
+<div class="pdf-keep-together jd-module">{_jd_html(brand, jd_rows, jd_total, ordered_products)}</div>{''.join(product_sections)}
 </main></div></div>{mobile_zoom_script}</body></html>"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")

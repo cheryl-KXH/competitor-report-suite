@@ -48,13 +48,7 @@
       "price": 18,
       "remark": 16
     },
-    "rowHeightByLineCountPx": {
-      "1": 20,
-      "2": 32,
-      "3": 44,
-      "4": 56,
-      "5": 68
-    },
+    "rowHeightPx": 20,
     "headerHeightPx": 20
   },
   "trackedBrands": {

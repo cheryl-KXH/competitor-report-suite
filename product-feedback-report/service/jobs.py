@@ -50,11 +50,19 @@ DELIVERY_OUTPUT_PLATFORMS = (
     ("jdData", "京东"),
 )
 DELIVERY_OUTPUT_FIELDS = ("meituanData", "elemeData", "jdData")
-REPORT_OUTPUT_FIELDS = (*DELIVERY_OUTPUT_FIELDS, "report", "folder")
+# The archive folder link is available as soon as generation creates/reuses the
+# task folder. Keep it visible while report outputs are regenerated; the
+# separate finalization action only archives the original input documents.
+REPORT_OUTPUT_FIELDS = (*DELIVERY_OUTPUT_FIELDS, "report")
 SOCIAL_INPUT_PLATFORMS = (("socialCleanedRawData", "社媒CleanedRawData"),)
 SOCIAL_INPUT_FIELDS = tuple(key for key, _ in SOCIAL_INPUT_PLATFORMS)
 AI_TABLE_ATTACHMENT_URL_ATTEMPTS = 10
 AI_TABLE_ATTACHMENT_URL_DELAY_SECONDS = 1.0
+MANUAL_PRODUCT_MENU_REVIEW = (
+    "请人工检查新品上新日期标注是否有遗漏，"
+    "如有遗漏请手动调整产品清单后重新生成"
+)
+JD_MANUAL_REVIEW_NOTICE = f"京东外卖无数据（{MANUAL_PRODUCT_MENU_REVIEW}）"
 
 
 class ArchivedSocialSourceUnreadable(RuntimeError):
@@ -95,7 +103,12 @@ def _task_delivery_input_dir(configs: dict[str, dict[str, Any]], record: dingtal
 def _task_docs_folder_id(
     configs: dict[str, dict[str, Any]],
     record: dingtalk_table.TaskRecord,
-    keys: tuple[str, ...] = ("deliveryData", "productMenu", *DELIVERY_OUTPUT_FIELDS),
+    keys: tuple[str, ...] = (
+        "deliveryData",
+        "productMenu",
+        "productMenuAuto",
+        *DELIVERY_OUTPUT_FIELDS,
+    ),
 ) -> str | None:
     docs_config = configs.get("dingtalk_docs", {})
     for key in keys:
@@ -418,6 +431,23 @@ def _ensure_local_upload_folder(
     return folder_id
 
 
+def _write_archive_folder_link(
+    configs: dict[str, dict[str, Any]],
+    record: dingtalk_table.TaskRecord,
+    folder_id: str,
+) -> None:
+    dingtalk_table.update_link_fields(
+        configs,
+        record.record_id,
+        {
+            "folder": (
+                _task_folder_name(record),
+                dingtalk_docs.node_url(folder_id),
+            )
+        },
+    )
+
+
 def _clean_folder_text(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|\r\n]+', "_", value).strip()
 
@@ -509,6 +539,30 @@ def _cache_promoted_input(
     if source.resolve() != target.resolve():
         shutil.copy2(source, target)
     return target
+
+
+def _write_auto_product_menu(
+    configs: dict[str, dict[str, Any]],
+    record: dingtalk_table.TaskRecord,
+    path: Path,
+    folder_id: str,
+) -> tuple[Path, str]:
+    auto_path = path
+    if not path.stem.endswith("-自动生成"):
+        auto_path = path.with_name(f"{path.stem}-自动生成{path.suffix}")
+        shutil.copy2(path, auto_path)
+    url = dingtalk_docs.upload_file(
+        configs.get("dingtalk_docs", {}), auto_path, folder_id
+    )
+    dingtalk_table.update_attachment_fields(
+        configs,
+        record.record_id,
+        {"productMenuAuto": (auto_path.name, url)},
+    )
+    record.cells["productMenuAuto"] = dingtalk_table.attachment_cell(
+        auto_path.name, url
+    )
+    return auto_path, url
 
 
 def _task_annotation_path(configs: dict[str, dict[str, Any]], record: dingtalk_table.TaskRecord) -> Path | None:
@@ -717,6 +771,9 @@ def _format_report_completion_feedback(warnings: list[str]) -> str:
             continue
         if warning.endswith(platform_missing_suffixes):
             continue
+        if warning == "京东外卖无数据":
+            delivery_warnings.append(JD_MANUAL_REVIEW_NOTICE)
+            continue
         if warning.endswith("外卖无数据"):
             delivery_warnings.append(warning)
             continue
@@ -736,7 +793,14 @@ def _format_report_completion_feedback(warnings: list[str]) -> str:
         product_labels = "".join(f"[{product}]" for product in consumer_only)
         segments.append(f"{product_labels}消费者反馈统计暂无法获取")
     segments.extend(other_warnings)
-    return "报告已生成" if not segments else f"报告已生成：{'；'.join(segments)}"
+    if not segments:
+        return f"报告已生成（{MANUAL_PRODUCT_MENU_REVIEW}）"
+    if segments[0] == JD_MANUAL_REVIEW_NOTICE:
+        return f"报告已生成，{'；'.join(segments)}"
+    return (
+        f"报告已生成（{MANUAL_PRODUCT_MENU_REVIEW}）："
+        f"{'；'.join(segments)}"
+    )
 
 
 def _prepare_delivery_run_inputs(
@@ -760,17 +824,12 @@ def _prepare_delivery_run_inputs(
     if pre_annotation_callback:
         pre_annotation_callback()
 
-    menu_value = record.cells.get("productMenu")
-    manual_attachment = _single_ai_table_attachment(
-        menu_value, "产品清单", require_url=False
-    )
+    adjusted_value = record.cells.get("productMenu")
+    has_adjusted_menu = bool(_value_items(adjusted_value))
     auto_annotation_path: Path | None = None
-    if not manual_attachment or auto_menu_callback:
+    if not has_adjusted_menu:
         if progress_callback:
-            message = "3/6 正在自动标注在售不满30天的产品上新日期"
-            if manual_attachment:
-                message = "3/6 正在生成产品清单样件并读取人工配置的产品清单"
-            progress_callback(message)
+            progress_callback("3/6 正在自动标注在售不满30天的产品上新日期")
         auto_annotation_path = prepare_product_menu(
             record.record_id,
             delivery_dir,
@@ -779,14 +838,14 @@ def _prepare_delivery_run_inputs(
         )
         if auto_menu_callback:
             auto_menu_callback(auto_annotation_path)
-    if manual_attachment:
-        if progress_callback and not auto_menu_callback:
+    if has_adjusted_menu:
+        if progress_callback:
             progress_callback("3/6 正在读取人工配置的产品清单")
         annotation_path = _download_uploaded_xlsx(
             configs,
             record,
             "productMenu",
-            "产品清单",
+            "产品清单Adjusted",
             workspace / "product_menu",
         )
         assert annotation_path is not None
@@ -926,8 +985,11 @@ def run_prepare_product_menu(record_id: str) -> dict[str, Any]:
         dingtalk_table.mark_status(configs, record_id, _status(configs, "productMenuRunning", "产品清单生成中"))
         record = dingtalk_table.fetch_record(configs, record_id)
         folder_id = _ensure_local_upload_folder(configs, record)
-        dingtalk_table.clear_attachment_fields(configs, record_id, ("productMenu",))
-        record.cells["productMenu"] = []
+        _write_archive_folder_link(configs, record, folder_id)
+        dingtalk_table.clear_attachment_fields(
+            configs, record_id, ("productMenuAuto",)
+        )
+        record.cells["productMenuAuto"] = []
         progress_callback("1/4 正在读取外卖数据")
         with tempfile.TemporaryDirectory(prefix="feedback-product-menu-") as tmp:
             input_dir = Path(tmp) / "delivery"
@@ -942,11 +1004,13 @@ def run_prepare_product_menu(record_id: str) -> dict[str, Any]:
                 report_date=_task_report_date(record),
             )
         progress_callback("4/4 正在上传到钉钉文档")
-        url = dingtalk_docs.upload_file(configs.get("dingtalk_docs", {}), output, folder_id)
+        output, url = _write_auto_product_menu(
+            configs, record, output, folder_id
+        )
         dingtalk_table.mark_links(
             configs,
             record_id,
-            {"productMenu": (output.name, url)},
+            {},
             _status(configs, "waitingAnnotation", "待标注"),
         )
         progress_callback("已提取产品清单，请确认在售不满30日的新品上新日期标注无遗漏后，再进行外卖数据统计")
@@ -968,16 +1032,21 @@ def run_generate_delivery_tables(record_id: str) -> dict[str, Any]:
         dingtalk_table.mark_status(configs, record_id, _status(configs, "dataTablesRunning", "外卖数据统计中"))
         record = dingtalk_table.fetch_record(configs, record_id)
         folder_id = _ensure_local_upload_folder(configs, record)
+        _write_archive_folder_link(configs, record, folder_id)
         dingtalk_table.clear_link_fields(configs, record_id, DELIVERY_OUTPUT_FIELDS)
         for key in DELIVERY_OUTPUT_FIELDS:
             record.cells[key] = ""
         progress_callback("1/3 正在读取 AI 表上传的外卖数据和可选产品清单")
         with tempfile.TemporaryDirectory(prefix="feedback-delivery-") as tmp:
+            def write_auto_menu(path: Path) -> None:
+                _write_auto_product_menu(configs, record, path, folder_id)
+
             input_dir, annotation_path, _ = _prepare_delivery_run_inputs(
                 configs,
                 record,
                 Path(tmp),
                 progress_callback=progress_callback,
+                auto_menu_callback=write_auto_menu,
             )
             progress_callback("2/3 正在生成外卖数表")
             outputs = generate_delivery_tables(
@@ -1029,7 +1098,7 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
     configs = load_configs()
     progress_callback = build_progress_callback(configs, record_id)
     try:
-        progress_callback("1/5 正在启动归档")
+        progress_callback("1/3 正在读取并校验待归档文件")
         record = dingtalk_table.fetch_record(configs, record_id)
         if not record.cells.get("report"):
             raise RuntimeError("最终报告链接为空，请先生成并检查报告。")
@@ -1038,7 +1107,6 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
         products = _task_products(record)
         if not brand or not products:
             raise RuntimeError("归档缺少竞品品牌或关注新品。")
-        progress_callback("2/5 正在校验并整理待归档文件")
         report_url = dingtalk_docs.extract_link(record.cells.get("report"))
         social_configs = _consumer_feedback_configs(configs)
         social_matches = _matching_social_records(
@@ -1047,9 +1115,10 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
             report_date=report_date,
             products=products,
         )
-        progress_callback("3/5 正在创建目录并上传原始文件")
+        progress_callback("2/3 正在上传并回写原始文件")
         folder_id = _ensure_local_upload_folder(configs, record)
         folder_url = dingtalk_docs.node_url(folder_id)
+        _write_archive_folder_link(configs, record, folder_id)
 
         main_uploads: dict[str, tuple[str, str]] = {}
         social_uploads: dict[str, dict[str, tuple[str, str]]] = {}
@@ -1089,19 +1158,21 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
                 if match:
                     crawl_date = datetime.strptime(match.group(1), "%Y%m%d").date()
 
-            menu_value = record.cells.get("productMenu")
-            if _value_items(menu_value) and not _has_dingtalk_node_link(menu_value):
+            adjusted_value = record.cells.get("productMenu")
+            if _value_items(adjusted_value) and not _has_dingtalk_node_link(
+                adjusted_value
+            ):
                 menu_path = _download_uploaded_xlsx(
                     configs,
                     record,
                     "productMenu",
-                    "产品清单",
+                    "产品清单Adjusted",
                     workspace / "product_menu",
                 )
                 assert menu_path is not None
                 normalized = menu_path.with_name(
                     safe_delivery_filename(
-                        f"{brand}-{crawl_date:%Y%m%d}-产品清单.xlsx"
+                        f"{brand}-{crawl_date:%Y%m%d}-产品清单-手动调整.xlsx"
                     )
                 )
                 if normalized != menu_path:
@@ -1136,7 +1207,6 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
                 ] = (normalized.name, url)
                 archived_files.append(normalized.name)
 
-        progress_callback("4/5 正在回写归档链接")
         if main_uploads:
             dingtalk_table.update_attachment_fields(
                 configs, record_id, main_uploads
@@ -1145,17 +1215,7 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
             dingtalk_table.update_attachment_fields(
                 social_configs, social_record_id, links
             )
-        dingtalk_table.update_link_fields(
-            configs,
-            record_id,
-            {
-                "folder": (
-                    _task_folder_name(record),
-                    folder_url,
-                )
-            },
-        )
-        message = "5/5 原始文件归档完成"
+        message = "3/3 原始文件归档完成"
         if archived_files:
             message += f"：{'、'.join(archived_files)}"
         else:
@@ -1197,6 +1257,7 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
             raise RuntimeError("“关注新品”为空，无法生成报告。")
         social_configs = _consumer_feedback_configs(configs)
         folder_id = _ensure_local_upload_folder(configs, record)
+        _write_archive_folder_link(configs, record, folder_id)
         dingtalk_table.clear_link_fields(configs, record_id, REPORT_OUTPUT_FIELDS)
         warnings: list[str] = []
         with tempfile.TemporaryDirectory(prefix="feedback-report-") as tmp:
@@ -1229,8 +1290,8 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
                 workspace,
                 progress_callback=progress_callback,
                 pre_annotation_callback=download_social_sources,
-                auto_menu_callback=lambda path: dingtalk_docs.upload_file(
-                    configs.get("dingtalk_docs", {}), path, folder_id
+                auto_menu_callback=lambda path: _write_auto_product_menu(
+                    configs, record, path, folder_id
                 ),
             )
 

@@ -116,7 +116,75 @@ class DeliveryJobTests(unittest.TestCase):
         execute.assert_called_once()
         wait.assert_not_called()
 
+    def test_query_records_retries_transient_timeout_text(self) -> None:
+        timed_out = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "error", "error": "请求超时"}),
+            stderr="",
+        )
+        ready = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "success", "data": {"records": []}}),
+            stderr="",
+        )
+        with (
+            patch(
+                "service.dingtalk_table.subprocess.run",
+                side_effect=[timed_out, ready],
+            ) as execute,
+            patch("service.dingtalk_table.time.sleep") as wait,
+        ):
+            result = dingtalk_table.call_table_tool(
+                {"serverName": "dingtalk-ai-table"},
+                "query_records",
+                {"baseId": "base", "tableId": "table"},
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(execute.call_count, 2)
+        wait.assert_called_once_with(1.0)
+
+    def test_field_read_and_idempotent_update_retry_transient_timeout(self) -> None:
+        timed_out = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "error", "error": "请求超时"}),
+            stderr="",
+        )
+        ready = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "success", "data": {}}),
+            stderr="",
+        )
+        for tool_name in ("get_fields", "update_records"):
+            with self.subTest(tool_name=tool_name):
+                with (
+                    patch(
+                        "service.dingtalk_table.subprocess.run",
+                        side_effect=[timed_out, ready],
+                    ) as execute,
+                    patch("service.dingtalk_table.time.sleep") as wait,
+                ):
+                    result = dingtalk_table.call_table_tool(
+                        {"serverName": "dingtalk-ai-table"},
+                        tool_name,
+                        {"baseId": "base", "tableId": "table"},
+                    )
+
+                    self.assertEqual(result["status"], "success")
+                    self.assertEqual(execute.call_count, 2)
+                    wait.assert_called_once_with(1.0)
+
     def test_report_completion_feedback_groups_missing_social_products(self) -> None:
+        self.assertEqual(
+            _format_report_completion_feedback([]),
+            "报告已生成"
+            "（请人工检查新品上新日期标注是否有遗漏，如有遗漏请手动调整产品清单后重新生成）",
+        )
+        self.assertEqual(
+            _format_report_completion_feedback(["京东外卖无数据"]),
+            "报告已生成，京东外卖无数据"
+            "（请人工检查新品上新日期标注是否有遗漏，如有遗漏请手动调整产品清单后重新生成）",
+        )
         feedback = _format_report_completion_feedback(
             [
                 "咸乳酪泰奶社媒无数据",
@@ -130,7 +198,8 @@ class DeliveryJobTests(unittest.TestCase):
 
         self.assertEqual(
             feedback,
-            "报告已生成：京东外卖无数据；"
+            "报告已生成，京东外卖无数据"
+            "（请人工检查新品上新日期标注是否有遗漏，如有遗漏请手动调整产品清单后重新生成）；"
             "[咸乳酪泰奶][香椰泰茶]社媒无数据",
         )
 
@@ -190,7 +259,7 @@ class DeliveryJobTests(unittest.TestCase):
                 )
         self.assertEqual(messages, ["3/6 正在读取人工配置的产品清单"])
 
-    def test_report_always_exports_auto_menu_sample_but_uses_manual_menu(self) -> None:
+    def test_report_uses_manual_menu_without_generating_auto_sample(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             delivery = root / "delivery.xlsx"
@@ -214,6 +283,12 @@ class DeliveryJobTests(unittest.TestCase):
                             "url": "https://ai/menu",
                         }
                     ],
+                    "productMenuAuto": [
+                        {
+                            "name": auto_menu.name,
+                            "url": "https://alidocs.dingtalk.com/i/nodes/auto-menu",
+                        }
+                    ],
                 },
             )
             messages: list[str] = []
@@ -235,11 +310,11 @@ class DeliveryJobTests(unittest.TestCase):
                 )
 
         self.assertEqual(annotation_path, manual_menu)
-        self.assertEqual(exported, [auto_menu])
-        prepare.assert_called_once()
+        self.assertEqual(exported, [])
+        prepare.assert_not_called()
         self.assertEqual(
             messages,
-            ["3/6 正在生成产品清单样件并读取人工配置的产品清单"],
+            ["3/6 正在读取人工配置的产品清单"],
         )
 
     def test_report_step_three_describes_automatic_annotation(self) -> None:
@@ -253,21 +328,46 @@ class DeliveryJobTests(unittest.TestCase):
                     "deliveryData": [{"resourceId": "delivery", "name": delivery.name, "url": "https://ai/delivery"}],
                     "launchDate": "2026-07-18",
                     "productMenu": [],
+                    "productMenuAuto": [
+                        {
+                            "name": "旧自动产品清单.xlsx",
+                            "url": "https://alidocs.dingtalk.com/i/nodes/old-auto-menu",
+                        }
+                    ],
                 },
             )
             messages: list[str] = []
+            exported: list[Path] = []
             with (
-                patch("service.jobs._download_uploaded_xlsx", return_value=delivery),
+                patch(
+                    "service.jobs._download_uploaded_xlsx", return_value=delivery
+                ) as download_uploaded,
                 patch("service.jobs.find_delivery_rows", return_value=[MagicMock()]),
-                patch("service.jobs.prepare_product_menu", return_value=generated),
+                patch(
+                    "service.jobs.prepare_product_menu", return_value=generated
+                ) as prepare,
             ):
-                _prepare_delivery_run_inputs(
-                    {}, record, root / "workspace", progress_callback=messages.append
+                _, annotation_path, _ = _prepare_delivery_run_inputs(
+                    {},
+                    record,
+                    root / "workspace",
+                    progress_callback=messages.append,
+                    auto_menu_callback=exported.append,
                 )
         self.assertEqual(
             messages,
             ["3/6 正在自动标注在售不满30天的产品上新日期"],
         )
+        self.assertEqual(annotation_path, generated)
+        self.assertEqual(exported, [generated])
+        download_uploaded.assert_called_once_with(
+            {},
+            record,
+            "deliveryData",
+            "外卖数据",
+            root / "workspace" / "delivery",
+        )
+        prepare.assert_called_once()
 
     def test_report_checks_social_sources_before_annotation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,7 +411,7 @@ class DeliveryJobTests(unittest.TestCase):
         prepare_menu.assert_not_called()
         self.assertEqual(messages, [])
 
-    def test_report_job_ensures_folder_then_stops_before_reading_inputs_when_clear_fails(self) -> None:
+    def test_report_job_keeps_archive_folder_when_clearing_old_report_outputs(self) -> None:
         configs = {
             "dingtalk": {},
             "field_mapping": {"fields": {}},
@@ -340,6 +440,10 @@ class DeliveryJobTests(unittest.TestCase):
                 side_effect=lambda *_args: events.append("folder") or "task-folder",
             ) as ensure_folder,
             patch(
+                "service.jobs.dingtalk_table.update_link_fields",
+                side_effect=lambda *_args: events.append("folder-link"),
+            ) as update_folder_link,
+            patch(
                 "service.jobs.dingtalk_table.clear_link_fields",
                 side_effect=fail_clear,
             ) as clear_links,
@@ -353,9 +457,19 @@ class DeliveryJobTests(unittest.TestCase):
         clear_links.assert_called_once_with(
             configs,
             "record",
-            ("meituanData", "elemeData", "jdData", "report", "folder"),
+            ("meituanData", "elemeData", "jdData", "report"),
         )
-        self.assertEqual(events, ["folder", "clear"])
+        update_folder_link.assert_called_once_with(
+            configs,
+            "record",
+            {
+                "folder": (
+                    "霸王茶姬：糯青山柠檬奶 20260718",
+                    "https://alidocs.dingtalk.com/i/nodes/task-folder",
+                )
+            },
+        )
+        self.assertEqual(events, ["folder", "folder-link", "clear"])
         prepare_inputs.assert_not_called()
         self.assertIn("旧结果清空失败", mark_failed.call_args.args[2])
 
@@ -371,7 +485,7 @@ class DeliveryJobTests(unittest.TestCase):
             social = root / "雾红尘.xlsx"
             unrelated_social = root / "不应进入.xlsx"
             auto_menu_sample = root / "霸王茶姬-20260718-产品清单.xlsx"
-            for path in (mt, elm, social, unrelated_social):
+            for path in (mt, elm, social, unrelated_social, auto_menu_sample):
                 path.write_bytes(b"xlsx")
             configs = {
                 "dingtalk": {},
@@ -454,6 +568,9 @@ class DeliveryJobTests(unittest.TestCase):
                 download_linked = stack.enter_context(patch("service.jobs.dingtalk_docs.download_linked_file"))
                 generate = stack.enter_context(patch("service.jobs.generate_report", return_value=ReportBuildResult(output, ("图片缺失",), pdf_output)))
                 upload = stack.enter_context(patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/report"))
+                update_attachments = stack.enter_context(
+                    patch("service.jobs.dingtalk_table.update_attachment_fields")
+                )
                 mark_links = stack.enter_context(patch("service.jobs.dingtalk_table.mark_links"))
                 update_feedback = stack.enter_context(patch("service.jobs.dingtalk_table.update_feedback"))
                 result = run_generate_report("record")
@@ -461,7 +578,7 @@ class DeliveryJobTests(unittest.TestCase):
         clear_links.assert_called_once_with(
             configs,
             "record",
-            ("meituanData", "elemeData", "jdData", "report", "folder"),
+            ("meituanData", "elemeData", "jdData", "report"),
         )
         grouped_record = ensure_folder.call_args.args[1]
         self.assertIs(grouped_record, main_record)
@@ -472,7 +589,20 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertEqual(generate.call_args.args[2], ["糯青山柠檬奶", "雾红尘柠檬奶"])
         self.assertNotIn("不应进入报告", generate.call_args.args[2])
         download_linked.assert_not_called()
-        self.assertIn(call({}, auto_menu_sample, "dated-folder"), upload.call_args_list)
+        uploaded_auto_menu = auto_menu_sample.with_name(
+            "霸王茶姬-20260718-产品清单-自动生成.xlsx"
+        )
+        self.assertIn(call({}, uploaded_auto_menu, "dated-folder"), upload.call_args_list)
+        update_attachments.assert_called_once_with(
+            configs,
+            "record",
+            {
+                "productMenuAuto": (
+                    uploaded_auto_menu.name,
+                    "https://example/report",
+                )
+            },
+        )
         self.assertEqual(upload.call_args_list[-2], call({}, output, "dated-folder"))
         self.assertEqual(upload.call_args_list[-1], call({}, pdf_output, "dated-folder"))
         self.assertTrue(
@@ -761,6 +891,12 @@ class DeliveryJobTests(unittest.TestCase):
                     "report": {"text": "报告", "link": "https://docs/report"},
                     "deliveryData": [{"resourceId": "raw", "name": delivery.name, "url": "https://ai/raw"}],
                     "productMenu": [{"resourceId": "menu", "name": menu.name, "url": "https://ai/menu"}],
+                    "productMenuAuto": [
+                        {
+                            "name": "霸王茶姬-20260716-产品清单.xlsx",
+                            "url": "https://docs/old-auto-menu",
+                        }
+                    ],
                 },
             )
             social_record = dingtalk_table.TaskRecord(
@@ -823,16 +959,14 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertEqual(result["archivedFileCount"], 3)
         self.assertEqual(
             result["archivedFileNames"],
-            "霸王茶姬-20260716-外卖清洗数据.xlsx、霸王茶姬-20260716-产品清单.xlsx、霸王茶姬-20260718-雾红尘柠檬奶-社媒清洗数据.xlsx",
+            "霸王茶姬-20260716-外卖清洗数据.xlsx、霸王茶姬-20260716-产品清单-手动调整.xlsx、霸王茶姬-20260718-雾红尘柠檬奶-社媒清洗数据.xlsx",
         )
         self.assertEqual(
             [item.args[2] for item in update_feedback.call_args_list],
             [
-                "1/5 正在启动归档",
-                "2/5 正在校验并整理待归档文件",
-                "3/5 正在创建目录并上传原始文件",
-                "4/5 正在回写归档链接",
-                "5/5 原始文件归档完成：霸王茶姬-20260716-外卖清洗数据.xlsx、霸王茶姬-20260716-产品清单.xlsx、霸王茶姬-20260718-雾红尘柠檬奶-社媒清洗数据.xlsx",
+                "1/3 正在读取并校验待归档文件",
+                "2/3 正在上传并回写原始文件",
+                "3/3 原始文件归档完成：霸王茶姬-20260716-外卖清洗数据.xlsx、霸王茶姬-20260716-产品清单-手动调整.xlsx、霸王茶姬-20260718-雾红尘柠檬奶-社媒清洗数据.xlsx",
             ],
         )
         self.assertEqual(upload.call_count, 3)
@@ -841,11 +975,15 @@ class DeliveryJobTests(unittest.TestCase):
             main_links["deliveryData"][0],
             "霸王茶姬-20260716-外卖清洗数据.xlsx",
         )
-        self.assertEqual(main_links["productMenu"][0], "霸王茶姬-20260716-产品清单.xlsx")
+        self.assertEqual(
+            main_links["productMenu"][0],
+            "霸王茶姬-20260716-产品清单-手动调整.xlsx",
+        )
+        self.assertNotIn("productMenuAuto", main_links)
         self.assertEqual(update.call_args_list[1].args[1], "social")
         self.assertEqual(
             write_events,
-            [("attachment", "record"), ("attachment", "social"), ("folder", "record")],
+            [("folder", "record"), ("attachment", "record"), ("attachment", "social")],
         )
         update_links.assert_called_once_with(
             configs,
@@ -985,13 +1123,18 @@ class DeliveryJobTests(unittest.TestCase):
         configs = {"dingtalk": {}, "field_mapping": {"fields": {}}, "report_rules": {}}
         record = dingtalk_table.TaskRecord(
             "record",
-            {"productMenu": [{"name": "旧产品清单.xlsx", "url": "https://example/old"}]},
+            {
+                "productMenuAuto": [
+                    {"name": "旧产品清单.xlsx", "url": "https://example/old"}
+                ]
+            },
         )
         with (
             patch("service.jobs.load_configs", return_value=configs),
             patch("service.jobs.dingtalk_table.mark_status"),
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
             patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+            patch("service.jobs._write_archive_folder_link"),
             patch(
                 "service.jobs.dingtalk_table.clear_attachment_fields",
                 side_effect=RuntimeError("旧结果附件清空失败，请刷新钉钉 AI 表后重试。"),
@@ -1024,6 +1167,7 @@ class DeliveryJobTests(unittest.TestCase):
             patch("service.jobs.dingtalk_table.mark_status"),
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
             patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+            patch("service.jobs._write_archive_folder_link"),
             patch(
                 "service.jobs.dingtalk_table.clear_link_fields",
                 side_effect=RuntimeError("旧结果链接清空失败，请刷新钉钉 AI 表后重试。"),
@@ -1816,8 +1960,12 @@ class DeliveryJobTests(unittest.TestCase):
                 ),
                 patch("service.jobs.prepare_product_menu", side_effect=prepare),
                 patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+                patch("service.jobs._write_archive_folder_link"),
                 patch("service.jobs.dingtalk_docs.upload_file", return_value="https://example/menu"),
                 patch("service.jobs.dingtalk_table.mark_links"),
+                patch(
+                    "service.jobs.dingtalk_table.update_attachment_fields"
+                ) as update_attachments,
                 patch(
                     "service.jobs.dingtalk_table.clear_attachment_fields",
                     side_effect=lambda *args: events.append("clear"),
@@ -1827,8 +1975,24 @@ class DeliveryJobTests(unittest.TestCase):
                 result = run_prepare_product_menu("record")
 
         self.assertTrue(result["ok"])
-        clear_fields.assert_called_once_with(configs, "record", ("productMenu",))
+        clear_fields.assert_called_once_with(
+            configs, "record", ("productMenuAuto",)
+        )
+        update_attachments.assert_called_once_with(
+            configs,
+            "record",
+            {
+                "productMenuAuto": (
+                    "茉莉奶白-20260710-产品清单-自动生成.xlsx",
+                    "https://example/menu",
+                )
+            },
+        )
         self.assertEqual(events, ["clear"])
+        self.assertEqual(
+            Path(result["output"]).name,
+            "茉莉奶白-20260710-产品清单-自动生成.xlsx",
+        )
         self.assertEqual(
             [call.args[2] for call in update_feedback.call_args_list],
             [
@@ -1845,6 +2009,8 @@ class DeliveryJobTests(unittest.TestCase):
             root = Path(tmp)
             annotation_path = root / "产品清单.xlsx"
             annotation_path.write_bytes(b"annotation")
+            auto_menu = root / "茉莉奶白-20260710-产品清单.xlsx"
+            auto_menu.write_bytes(b"auto-menu")
             outputs = {
                 "meituanData": root / "茉莉奶白-20260710-美团.xlsx",
                 "elemeData": root / "茉莉奶白-20260710-饿了么.xlsx",
@@ -1871,18 +2037,23 @@ class DeliveryJobTests(unittest.TestCase):
             )
             events: list[str] = []
 
+            def prepare_inputs(*_args, **kwargs):
+                kwargs["auto_menu_callback"](auto_menu)
+                return root / "raw", annotation_path, []
+
             with (
                 patch("service.jobs.load_configs", return_value=configs),
                 patch("service.jobs.dingtalk_table.mark_status"),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
                 patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+                patch("service.jobs._write_archive_folder_link"),
                 patch(
                     "service.jobs.dingtalk_docs.folder_id_for_linked_node",
                     return_value="shared-folder",
                 ),
                 patch(
                     "service.jobs._prepare_delivery_run_inputs",
-                    return_value=(root / "raw", annotation_path, []),
+                    side_effect=prepare_inputs,
                 ),
                 patch(
                     "service.jobs.generate_delivery_tables",
@@ -1893,6 +2064,9 @@ class DeliveryJobTests(unittest.TestCase):
                     "service.jobs.dingtalk_docs.upload_file",
                     side_effect=lambda config, path, folder_id: f"https://example/{path.stem}",
                 ) as upload_file,
+                patch(
+                    "service.jobs.dingtalk_table.update_attachment_fields"
+                ) as update_attachments,
                 patch("service.jobs._filter_links_for_existing_fields", side_effect=lambda configs, links: links),
                 patch(
                     "service.jobs.dingtalk_table.clear_link_fields",
@@ -1910,11 +2084,25 @@ class DeliveryJobTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         clear_fields.assert_called_once_with(configs, "record", ("meituanData", "elemeData", "jdData"))
         self.assertLess(events.index("clear"), events.index("generate"))
-        self.assertEqual(upload_file.call_count, 2)
-        self.assertEqual([item.args[2] for item in upload_file.call_args_list], ["shared-folder"] * 2)
+        self.assertEqual(upload_file.call_count, 3)
+        self.assertEqual([item.args[2] for item in upload_file.call_args_list], ["shared-folder"] * 3)
         self.assertEqual(
             [item.args[1].name for item in upload_file.call_args_list],
-            ["茉莉奶白-20260710-美团.xlsx", "茉莉奶白-20260710-饿了么.xlsx"],
+            [
+                "茉莉奶白-20260710-产品清单-自动生成.xlsx",
+                "茉莉奶白-20260710-美团.xlsx",
+                "茉莉奶白-20260710-饿了么.xlsx",
+            ],
+        )
+        update_attachments.assert_called_once_with(
+            configs,
+            "record",
+            {
+                "productMenuAuto": (
+                    "茉莉奶白-20260710-产品清单-自动生成.xlsx",
+                    "https://example/茉莉奶白-20260710-产品清单-自动生成",
+                )
+            },
         )
         self.assertTrue(jd_file_was_removed)
         written_links = mark_links.call_args.args[2]
@@ -1966,6 +2154,7 @@ class DeliveryJobTests(unittest.TestCase):
                 patch("service.jobs.dingtalk_table.mark_status"),
                 patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
                 patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+                patch("service.jobs._write_archive_folder_link"),
                 patch(
                     "service.jobs.dingtalk_docs.folder_id_for_linked_node",
                     return_value="shared-folder",
@@ -2023,6 +2212,7 @@ class DeliveryJobTests(unittest.TestCase):
             patch("service.jobs.dingtalk_table.mark_status"),
             patch("service.jobs.dingtalk_table.fetch_record", return_value=record),
             patch("service.jobs._ensure_local_upload_folder", return_value="shared-folder"),
+            patch("service.jobs._write_archive_folder_link"),
             patch(
                 "service.jobs.dingtalk_docs.folder_id_for_linked_node",
                 return_value="shared-folder",

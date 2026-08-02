@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
@@ -66,6 +68,27 @@ def _write_cleaned_social_workbook(
         workbook["抖音"].append(["古茗", "d1", extra_product, "正向", "好喝", None])
     workbook.save(path)
     return path
+
+
+def _set_worksheet_dimensions_to_a1(path: Path) -> None:
+    """Simulate third-party exports whose sheet XML understates the used range."""
+    rewritten = path.with_name(f"{path.stem}-rewritten.xlsx")
+    with ZipFile(path, "r") as source:
+        entries = [
+            (item, source.read(item.filename))
+            for item in source.infolist()
+        ]
+    with ZipFile(rewritten, "w", ZIP_DEFLATED) as target:
+        for item, content in entries:
+            if item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml"):
+                content = re.sub(
+                    rb'<dimension ref="[^"]+"\s*/>',
+                    b'<dimension ref="A1:A1"/>',
+                    content,
+                    count=1,
+                )
+            target.writestr(item, content)
+    rewritten.replace(path)
 
 
 class SocialFeedbackStatisticsTests(unittest.TestCase):
@@ -361,6 +384,81 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
             ),
             "古茗-20260718-青橘芦荟冰冰茶-社媒清洗数据.xlsx",
         )
+
+    def test_cleaned_workbook_recovers_incorrect_worksheet_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = _write_cleaned_social_workbook(
+                Path(temporary) / "错误范围.xlsx",
+                "桃桃冰冰李",
+            )
+            _set_worksheet_dimensions_to_a1(source)
+
+            products = social_cleaned_workbook_products(source)
+            summaries = summarize_social_cleaned_workbook(source)
+
+        self.assertEqual(
+            products,
+            {normalize_social_product_key("桃桃冰冰李"): "桃桃冰冰李"},
+        )
+        by_key = {summary.key: summary for summary in summaries}
+        self.assertEqual(by_key["weibo"].positive_users, 1)
+        self.assertEqual(by_key["xiaohongshu"].positive_users, 1)
+
+    def test_cleaned_workbook_accepts_blank_and_no_data_platform_sheets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = _write_cleaned_social_workbook(
+                Path(temporary) / "部分平台无数据.xlsx",
+                "桃桃冰冰李",
+            )
+            workbook = load_workbook(source)
+            try:
+                dianping = workbook["大众点评"]
+                dianping.delete_rows(1, dianping.max_row)
+                dianping["A1"] = "暂无有效数据"
+
+                xiaohongshu = workbook["小红书"]
+                xiaohongshu.delete_rows(1, xiaohongshu.max_row)
+
+                bilibili = workbook["B站"]
+                bilibili.delete_rows(1, bilibili.max_row)
+                bilibili["A1"] = "实习生备注：本周期未找到相关内容"
+                workbook.save(source)
+            finally:
+                workbook.close()
+
+            products = social_cleaned_workbook_products(source)
+            summaries = summarize_social_cleaned_workbook(source)
+
+        self.assertEqual(
+            products,
+            {normalize_social_product_key("桃桃冰冰李"): "桃桃冰冰李"},
+        )
+        by_key = {summary.key: summary for summary in summaries}
+        self.assertEqual(by_key["weibo"].positive_users, 1)
+        for key in ("dianping", "xiaohongshu", "douyin", "bilibili"):
+            self.assertEqual(by_key[key].positive_users, 0)
+            self.assertEqual(by_key[key].negative_users, 0)
+            self.assertEqual(by_key[key].positive_tags, ())
+            self.assertEqual(by_key[key].negative_tags, ())
+
+    def test_cleaned_workbook_still_rejects_nonempty_malformed_sheet(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = _write_cleaned_social_workbook(
+                Path(temporary) / "表头错误.xlsx",
+                "桃桃冰冰李",
+            )
+            workbook = load_workbook(source)
+            try:
+                weibo = workbook["微博"]
+                weibo.delete_rows(1, weibo.max_row)
+                weibo.append(["品牌", "内容"])
+                weibo.append(["古茗", "有实际评论"])
+                workbook.save(source)
+            finally:
+                workbook.close()
+
+            with self.assertRaisesRegex(RuntimeError, "微博.*产品名称"):
+                social_cleaned_workbook_products(source)
 
     def test_workbook_matches_single_product_summary_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
