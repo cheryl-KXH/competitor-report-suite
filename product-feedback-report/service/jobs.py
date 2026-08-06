@@ -432,17 +432,52 @@ def _ensure_local_upload_folder(
     return folder_id
 
 
+def _delivery_task_folder_name(record: dingtalk_table.TaskRecord) -> str:
+    """Build an archive folder name for delivery-only statistics."""
+    brand = _clean_folder_text(_task_brand(record))
+    if not brand:
+        raise RuntimeError("“竞品品牌”为空，无法创建外卖统计归档目录。")
+    return f"{brand}：外卖数据统计 {_task_report_date(record):%Y%m%d}"
+
+
+def _ensure_delivery_upload_folder(
+    configs: dict[str, dict[str, Any]], record: dingtalk_table.TaskRecord
+) -> str:
+    """Create or reuse a delivery-only folder without requiring tracked products."""
+    report_date = _task_report_date(record)
+    docs_config = configs.get("dingtalk_docs", {})
+    folder_name = _delivery_task_folder_name(record)
+    month_id, _ = dingtalk_docs.ensure_local_upload_month_folder(
+        docs_config, report_date.year, report_date.month
+    )
+    matches = [
+        folder_id
+        for folder_id, name in dingtalk_docs.child_folders(docs_config, month_id)
+        if name == folder_name
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise RuntimeError(f"同一月份存在多个同名外卖统计归档目录：{folder_name}。")
+    folder_id, _ = dingtalk_docs.ensure_child_folder(
+        docs_config, month_id, folder_name
+    )
+    return folder_id
+
+
 def _write_archive_folder_link(
     configs: dict[str, dict[str, Any]],
     record: dingtalk_table.TaskRecord,
     folder_id: str,
+    folder_name: str | None = None,
 ) -> None:
+    folder_name = folder_name or _task_folder_name(record)
     dingtalk_table.update_link_fields(
         configs,
         record.record_id,
         {
             "folder": (
-                _task_folder_name(record),
+                folder_name,
                 dingtalk_docs.node_url(folder_id),
             )
         },
@@ -1032,8 +1067,11 @@ def run_generate_delivery_tables(record_id: str) -> dict[str, Any]:
     try:
         dingtalk_table.mark_status(configs, record_id, _status(configs, "dataTablesRunning", "外卖数据统计中"))
         record = dingtalk_table.fetch_record(configs, record_id)
-        folder_id = _ensure_local_upload_folder(configs, record)
-        _write_archive_folder_link(configs, record, folder_id)
+        folder_name = _delivery_task_folder_name(record)
+        folder_id = _ensure_delivery_upload_folder(configs, record)
+        _write_archive_folder_link(
+            configs, record, folder_id, folder_name=folder_name
+        )
         dingtalk_table.clear_link_fields(configs, record_id, DELIVERY_OUTPUT_FIELDS)
         for key in DELIVERY_OUTPUT_FIELDS:
             record.cells[key] = ""
@@ -1101,25 +1139,44 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
     try:
         progress_callback("1/3 正在读取并校验待归档文件")
         record = dingtalk_table.fetch_record(configs, record_id)
-        if not record.cells.get("report"):
-            raise RuntimeError("最终报告链接为空，请先生成并检查报告。")
         brand = _task_brand(record)
         report_date = _task_report_date(record)
         products = _task_products(record)
-        if not brand or not products:
-            raise RuntimeError("归档缺少竞品品牌或关注新品。")
-        report_url = dingtalk_docs.extract_link(record.cells.get("report"))
-        social_configs = _consumer_feedback_configs(configs)
-        social_matches = _matching_social_records(
-            social_configs,
-            brand=brand,
-            report_date=report_date,
-            products=products,
+        report_value = record.cells.get("report")
+        delivery_only = not products
+        if not brand:
+            raise RuntimeError("归档缺少竞品品牌。")
+        report_url = (
+            dingtalk_docs.extract_link(report_value) if report_value else ""
         )
+        if delivery_only:
+            social_configs: dict[str, dict[str, Any]] = {}
+            social_matches: dict[
+                str, tuple[str, dingtalk_table.TaskRecord, date]
+            ] = {}
+        else:
+            social_configs = _consumer_feedback_configs(configs)
+            social_matches = _matching_social_records(
+                social_configs,
+                brand=brand,
+                report_date=report_date,
+                products=products,
+            )
         progress_callback("2/3 正在上传并回写原始文件")
-        folder_id = _ensure_local_upload_folder(configs, record)
+        folder_name = (
+            _delivery_task_folder_name(record)
+            if delivery_only
+            else _task_folder_name(record)
+        )
+        folder_id = (
+            _ensure_delivery_upload_folder(configs, record)
+            if delivery_only
+            else _ensure_local_upload_folder(configs, record)
+        )
         folder_url = dingtalk_docs.node_url(folder_id)
-        _write_archive_folder_link(configs, record, folder_id)
+        _write_archive_folder_link(
+            configs, record, folder_id, folder_name=folder_name
+        )
 
         main_uploads: dict[str, tuple[str, str]] = {}
         social_uploads: dict[str, dict[str, tuple[str, str]]] = {}
