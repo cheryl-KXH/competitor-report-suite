@@ -1,446 +1,368 @@
 # Competitor Report Suite
 
-竞品报告自动化工具集，用于从钉钉 AI 表读取数据，生成竞品新品周报和竞品跟踪反馈报告。
+竞品报告自动化工具集，包含“竞品新品周报”和“竞品跟踪反馈报告”两个项目。
 
-## 项目组成
+这份 README 面向项目维护者和实习生，重点说明：
 
-| 目录 | 用途 |
+- 两个项目分别负责什么
+- 钉钉按钮如何通过 HTTP 调用代码
+- 数据如何进入统计和报告
+- 修改业务规则或排版时应该查看哪个文件
+
+本文不提供完整安装教程，也暂不展开跟踪反馈报告的本地 Python 调试命令。
+
+## 1. 整体架构
+
+```mermaid
+flowchart TD
+    A["钉钉 AI 表按钮 / 自动化"] --> B["统一 Gateway · 8000 端口"]
+    B --> C["新品周报 service/jobs.py"]
+    B --> D["跟踪反馈 service/jobs.py"]
+    C --> E["Excel · HTML · PNG"]
+    D --> F["平台数表 · HTML · PDF"]
+    E --> G["上传钉钉文档并回写 AI 表"]
+    F --> G
+```
+
+核心设计：
+
+- 两个项目共用根目录的 gateway/app.py 和同一个 8000 端口。
+- 钉钉自动化只调用 Gateway，不直接调用子项目的 service/app.py。
+- Gateway 根据 HTTP 路径判断任务属于哪个项目，再通过子进程执行对应的 service/jobs.py 函数。
+- 使用子进程可以避免两个项目都存在 service Python 包时发生导入冲突。
+- 钉钉请求只传当前行 recordId；品牌、产品、日期和附件由任务函数回到 AI 表读取。
+
+## 2. 项目组成
+
+| 目录 | 作用 |
 | --- | --- |
-| `new-product-monitor/` | 生成竞品新品周报，支持 Excel、HTML 和 PNG 输出，并提供 FastAPI 接口 |
-| `product-feedback-report/` | 整理外卖、京东和社媒数据，生成竞品跟踪反馈报告，并提供 FastAPI 接口 |
-| `gateway/` | 项目网关相关文件 |
-| `output/` | 生成结果目录；通常不应提交到 Git |
+| gateway/ | 统一 HTTP 入口和任务分发 |
+| new-product-monitor/ | 竞品新品周报：Excel、HTML、PNG |
+| product-feedback-report/ | 外卖、社媒统计和跟踪反馈 HTML/PDF |
+| 各模块的 outputs/ | 本地命令产生的结果，不是线上任务的数据源 |
 
-每个核心模块还有自己的 README，包含更详细的业务规则和命令说明：
+### 2.1 新品周报
 
-- [新品周报说明](new-product-monitor/README.md)
-- [跟踪反馈报告说明](product-feedback-report/README.md)
-
-## 环境要求
-
-建议准备：
-
-- macOS 或 Linux
-- Git
-- Python 3.10 或更高版本
-- pip
-- 钉钉 AI 表访问配置
-- 已安装并配置的 `mcporter`
-- Google Chrome（生成 PNG 长图时使用）
-- ngrok（需要让钉钉从公网调用本机服务时使用）
-
-## 1. 克隆项目
-
-```bash
-git clone https://github.com/cheryl-KXH/competitor-report-suite.git
-cd competitor-report-suite
+```text
+new-product-monitor/
+├── assets/                        # 字体和 Logo
+├── config/
+│   ├── field_mapping.json         # AI 表字段映射
+│   ├── report_rules.json          # 数据与业务规则
+│   ├── excel_layout.json          # Excel 排版
+│   ├── image_layout.json          # HTML/PNG 排版
+│   └── font_files.json            # 字体配置
+├── scripts/
+│   ├── generate_weekly_report.py  # 数据整理与 Excel
+│   ├── generate_weekly_outputs.py # Excel/HTML/PNG 统一入口
+│   └── render_report_image.py     # HTML/PNG 渲染
+├── service/
+│   ├── jobs.py                    # 钉钉周报任务编排
+│   ├── dingtalk_table.py          # AI 表读取和回写
+│   └── dingtalk_docs.py           # 钉钉文档上传
+├── tests/
+└── outputs/
 ```
 
-## 2. 安装统一运行环境
+### 2.2 跟踪反馈报告
 
-`gateway` 会使用当前 Python 解释器启动两个报告项目的任务，因此推荐在仓库根目录只创建一个共享虚拟环境，并把两个项目的依赖都安装进去：
-
-```bash
-cd ~/Desktop/competitor-report-suite
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r new-product-monitor/requirements.txt
-pip install -r product-feedback-report/requirements.txt
-python -m playwright install chromium
+```text
+product-feedback-report/
+├── assets/                        # 字体和 Logo
+├── config/
+│   ├── field_mapping.json         # AI 表字段映射
+│   ├── report_rules.json          # 报告规则
+│   ├── platform_rules.json        # 外卖平台规则
+│   ├── html_layout.json           # HTML/PDF 排版
+│   └── font_files.json            # 字体配置
+├── scripts/
+│   ├── delivery/
+│   │   ├── processing.py          # 外卖读取、合并和指标计算
+│   │   └── generate_tables.py     # 美团/饿了么/京东数表
+│   ├── social/
+│   │   ├── processing.py          # 社媒情感和标签统计
+│   │   └── generate_tables.py     # 消费者反馈数表
+│   └── reporting/
+│       ├── html.py                # 报告内容和样式
+│       ├── pdf.py                 # HTML 转 PDF
+│       └── generate_report.py     # HTML/PDF 生成
+├── service/
+│   ├── jobs.py                    # 完整业务流程编排
+│   ├── dingtalk_table.py          # AI 表读取和回写
+│   ├── dingtalk_docs.py           # 文件夹和文件上传
+│   └── schemas.py                 # HTTP 返回结构
+├── tests/
+└── outputs/
 ```
 
-Windows PowerShell 激活虚拟环境时使用：
+## 3. Gateway 和 HTTP 接口
 
-```powershell
-.venv\Scripts\Activate.ps1
+Gateway 统一监听 8000 端口。钉钉通过 ngrok 访问时，所有自动化使用同一个域名，只改变最后的路径。
+
+### 3.1 接口与代码对应关系
+
+| 钉钉动作 | HTTP | Gateway 调用 | 主要业务模块 | 返回方式 |
+| --- | --- | --- | --- | --- |
+| 生成新品周报 | POST /generate-weekly-report | new-product-monitor/service/jobs.py → run_schedule_job() | scripts/generate_weekly_outputs.py | 异步 |
+| 提取产品清单 | POST /prepare-product-menu | product-feedback-report/service/jobs.py → run_prepare_product_menu() | scripts/delivery/prepare_product_menu.py | 异步 |
+| 统计外卖数据 | POST /generate-delivery-tables | product-feedback-report/service/jobs.py → run_generate_delivery_tables() | scripts/delivery/generate_tables.py | 异步 |
+| 生成完整反馈报告 | POST /generate-report | product-feedback-report/service/jobs.py → run_generate_report() | delivery、social、reporting | 异步 |
+| 归档原始文件 | POST /finalize-report | product-feedback-report/service/jobs.py → run_finalize_report() | 钉钉文档上传与字段回写 | 同步 |
+
+Gateway 中仍保留 POST /generate-consumer-feedback 路由，但当前 jobs.py 没有对应任务函数。该接口不属于当前生产流程，不应配置到钉钉自动化；社媒统计由 /generate-report 内部完成。
+
+### 3.2 钉钉 HTTP 请求
+
+HTTP 节点统一使用 POST 和 JSON：
+
+```json
+{
+  "recordId": "钉钉自动化传入的当前行记录ID"
+}
 ```
 
-以后启动 Gateway 或执行任一项目的命令前，都先在仓库根目录激活这个环境：
+recordId 是触发自动化的 AI 表当前行记录 ID，不是品牌名或日期。
 
-```bash
-cd ~/Desktop/competitor-report-suite
-source .venv/bin/activate
+### 3.3 HTTP 200 的含义
+
+- /generate-weekly-report、/prepare-product-menu、/generate-delivery-tables、/generate-report：HTTP 200 只表示任务已被接收。最终结果看 AI 表状态和“反馈信息”。
+- /finalize-report：同步等待归档结束。HTTP 200 表示上传和字段回写完成；失败返回 HTTP 500。
+
+异步接口通常立即返回：
+
+```json
+{
+  "ok": true,
+  "status": "accepted",
+  "recordId": "当前行记录ID",
+  "message": "任务已接收。"
+}
 ```
 
-## 3. 配置新品周报模块
+## 4. 新品周报
 
-从仓库根目录复制配置模板：
+### 4.1 运行流程
 
-```bash
-cp new-product-monitor/config/dingtalk.example.json \
-  new-product-monitor/config/dingtalk.json
+```text
+竞品新品周报状态机当前行
+→ POST /generate-weekly-report
+→ run_schedule_job()
+→ 读取业务、开始时间、截止时间、年份、周次
+→ generate_weekly_outputs()
+→ 生成 Excel、HTML、PNG
+→ 上传业务对应的钉钉知识库
+→ 回写周报链接、状态、生成时间和反馈信息
 ```
 
-打开 `new-product-monitor/config/dingtalk.json`，根据自己的钉钉 AI 表填写连接信息。真实 Streamable HTTP URL 可能包含访问令牌，不要提交到 GitHub。
+钉钉 HTTP 任务在系统临时目录生成文件，上传完成后清理；不会在本机 outputs/ 留一份。
 
-### 生成新品周报：完整命令
+### 4.2 周报命令行
 
-以下命令都要在 `new-product-monitor/` 目录中运行，并确保虚拟环境已激活：
+以下命令在 new-product-monitor/ 目录运行。
 
-```bash
-cd ~/Desktop/competitor-report-suite/new-product-monitor
-source .venv/bin/activate
-```
-
-先校验并查看当前配置：
-
-```bash
-python scripts/generate_weekly_report.py --validate-config
-python scripts/generate_weekly_report.py --explain-config
-```
-
-#### 默认生成全部格式
-
-不带参数时，统一入口会生成 Excel、HTML 和 PNG：
+默认生成 Excel、HTML 和 PNG：
 
 ```bash
 python scripts/generate_weekly_outputs.py
 ```
 
-默认结果位于：
+常用参数：
 
-```text
-new-product-monitor/outputs/竞品新品周报YYYY-MM-DD_YYYY-MM-DD/
-```
+| 参数 | 含义 | 示例 |
+| --- | --- | --- |
+| --startDate | 开始日期，YYYYMMDD | 20260509 |
+| --endDate | 截止日期，YYYYMMDD | 20260515 |
+| --business | 业务范围 | 喜茶、野萃山、茶坊 |
+| --brands | 手动品牌范围，英文逗号分隔 | 霸王茶姬,古茗 |
+| --output-mode | all、excel、html、image | image |
+| --output-dir | 自定义输出目录 | outputs/test |
 
-同名目录已经存在时会自动添加 `_2`、`_3`，不会覆盖旧结果。
-
-#### 指定生成格式
-
-```bash
-# 只生成 Excel
-python scripts/generate_weekly_outputs.py --output-mode excel
-
-# 只生成 HTML
-python scripts/generate_weekly_outputs.py --output-mode html
-
-# 只生成 PNG 长图
-python scripts/generate_weekly_outputs.py --output-mode image
-
-# 明确生成全部格式
-python scripts/generate_weekly_outputs.py --output-mode all
-```
-
-#### 指定报告日期范围
-
-日期格式必须为 `YYYYMMDD`：
+指定周期和业务：
 
 ```bash
-python scripts/generate_weekly_outputs.py \
-  --startDate 20260509 \
+python scripts/generate_weekly_outputs.py \\
+  --business 喜茶 \\
+  --startDate 20260509 \\
   --endDate 20260515
 ```
 
-不传日期时，脚本按“周六到周五”的规则计算最近完整周期。
-
-#### 按业务生成
-
-支持的业务包括 `喜茶`、`野萃山` 和 `茶坊`：
+只生成 PNG：
 
 ```bash
-python scripts/generate_weekly_outputs.py --business 喜茶
-
-python scripts/generate_weekly_outputs.py \
-  --business 野萃山 \
-  --startDate 20260509 \
-  --endDate 20260515 \
-  --output-mode all
+python scripts/generate_weekly_outputs.py --output-mode image
 ```
 
-#### 手动指定竞品品牌
-
-品牌之间使用英文逗号分隔：
+手动指定品牌：
 
 ```bash
-python scripts/generate_weekly_report.py \
+python scripts/generate_weekly_outputs.py \\
   --brands 霸王茶姬,古茗,乐乐茶
 ```
 
-同时指定日期和品牌：
+--brands 和 --business 同时存在时，以 --brands 为准。不传日期时，按最近一个完整“周六到周五”周期计算。
+
+只生成 Excel：
 
 ```bash
-python scripts/generate_weekly_report.py \
-  --startDate 20260502 \
-  --endDate 20260508 \
+python scripts/generate_weekly_report.py \\
+  --startDate 20260509 \\
+  --endDate 20260515 \\
   --brands 霸王茶姬,古茗
 ```
 
-如果同时传入 `--brands` 和 `--business`，脚本优先使用 `--brands`。
+本地命令默认写入 new-product-monitor/outputs/。同名结果存在时添加 _2、_3，不覆盖旧结果。
 
-#### 只生成 Excel，并指定输出文件
+## 5. 跟踪反馈报告
 
-```bash
-python scripts/generate_weekly_report.py \
-  --startDate 20260502 \
-  --endDate 20260508 \
-  --output outputs/竞品新品周报2026-05-02_2026-05-08.xlsx
+```mermaid
+flowchart TD
+    A["AI 表当前行 recordId"] --> B{"钉钉按钮"}
+    B --> C["只统计外卖"]
+    B --> D["生成完整报告"]
+    C --> E["归档原始输入"]
+    D --> E
 ```
 
-通过钉钉按钮或 HTTP 调用生成周报时，不需要单独启动新品周报服务；请使用下方的统一 Gateway。
+### 5.1 只统计外卖
 
-## 4. 配置跟踪反馈报告模块
+HTTP：POST /generate-delivery-tables
 
-从仓库根目录复制两个配置模板：
+当前行需要竞品品牌、报告日期和“外卖数据”单个 .xlsx 附件；产品清单Adjusted 可选，关注新品可以为空。
 
-```bash
-cp product-feedback-report/config/dingtalk.example.json \
-  product-feedback-report/config/dingtalk.json
+处理过程：
 
-cp product-feedback-report/config/dingtalk_docs.example.json \
-  product-feedback-report/config/dingtalk_docs.json
-```
+1. run_generate_delivery_tables() 下载外卖附件。
+2. 有 Adjusted 时使用人工清单；没有时自动生成本次产品清单。
+3. generate_delivery_tables() 分别计算美团、饿了么和京东。
+4. 有数据的平台上传统计表并回写链接；无数据平台不上传空表。
 
-打开上述配置，填写自己的 `baseId`、`tableId`、钉钉文档目录和连接信息。
+这条流程不读取社媒，也不生成最终 HTML/PDF。
 
-检查配置：
+### 5.2 生成完整报告
 
-```bash
-cd ~/Desktop/competitor-report-suite/product-feedback-report
-python -m scripts.tools.validate_config
-cd ..
-```
+HTTP：POST /generate-report
 
-## 5. 启动统一 Gateway（两个报告共用 8000 端口）
+当前行需要竞品品牌、关注新品、报告日期和外卖附件。社媒附件从匹配到的消费者反馈记录中读取。
 
-Gateway 统一提供新品周报和反馈报告接口。只启动这一个服务，不需要分别启动两个子项目：
+run_generate_report() 一次完成：
 
-```bash
-cd ~/Desktop/competitor-report-suite
-source .venv/bin/activate
-uvicorn gateway.app:app --host 0.0.0.0 --port 8000
-```
+1. 读取当前行及关联的消费者反馈记录。
+2. 下载并校验外卖、社媒原始附件。
+3. 读取 Adjusted；为空时自动生成产品清单和近 30 日上新日期。
+4. 重新统计美团、饿了么、京东和社媒数据。
+5. 上传平台数表和消费者反馈数表。
+6. 生成并上传 HTML/PDF，回写 PDF 链接。
 
-保持这个终端窗口运行。打开第二个终端窗口检查：
+完整报告始终从原始附件重新计算，不读取之前由“统计外卖数据”按钮生成的数表。
 
-```bash
-curl http://127.0.0.1:8000/health
-```
+### 5.3 归档原始输入
 
-正常响应会包含两个项目的实际目录，例如：
+HTTP：POST /finalize-report
 
-```json
-{
-  "ok": true,
-  "weeklyRoot": "/Users/你的用户名/Desktop/competitor-report-suite/new-product-monitor",
-  "feedbackRoot": "/Users/你的用户名/Desktop/competitor-report-suite/product-feedback-report"
-}
-```
+run_finalize_report() 只归档用户提供的原始输入：
 
-如果 `weeklyRoot` 和 `feedbackRoot` 指向正确目录，说明 Gateway 已经找到两个报告项目。
+- 外卖原始数据
+- 产品清单Adjusted（存在时）
+- 社媒CleanedRawData（完整报告任务）
 
-Gateway 在同一个 8000 端口提供以下接口：
+自动产品清单、平台数表、消费者反馈数表、HTML 和 PDF 已在生成步骤上传，不属于原始文件归档范围。
 
-| 接口 | 所属报告 | 用途 |
-| --- | --- | --- |
-| `POST /generate-weekly-report` | 新品周报 | 根据钉钉记录生成新品周报 |
-| `POST /prepare-product-menu` | 反馈报告 | 生成产品清单 |
-| `POST /generate-delivery-tables` | 反馈报告 | 生成外卖统计数表 |
-| `POST /generate-consumer-feedback` | 反馈报告 | 生成消费者反馈统计 |
-| `POST /generate-report` | 反馈报告 | 生成完整反馈报告 |
-| `POST /finalize-report` | 反馈报告 | 检查完成后归档原始文件 |
+归档判断：
 
-如果需要让钉钉访问本机，再打开第三个终端窗口：
+- 有关注新品：归档外卖、Adjusted 和社媒原始数据。
+- 无关注新品：按纯外卖任务只归档外卖和 Adjusted。
+- 已是钉钉文档链接的字段直接跳过。
 
-```bash
-ngrok http 8000
-```
+## 6. 数据和文件设计
 
-钉钉自动化中的所有接口使用同一个 ngrok 域名，只需要改变最后的路径。
+### 原始输入
 
-### 通过 Gateway 生成新品周报
+原始输入是 AI 表中人工上传的 .xlsx：
 
-将 `你的记录ID` 替换成钉钉 AI 表当前行的真实记录 ID：
+- 外卖数据
+- 产品清单Adjusted
+- 社媒CleanedRawData
 
-```bash
-curl -X POST http://127.0.0.1:8000/generate-weekly-report \
-  -H "Content-Type: application/json" \
-  -d '{"recordId":"你的记录ID"}'
-```
+生成统计表和报告时读取原始附件；只有归档步骤会把原始附件字段替换为钉钉文档链接。
 
-### 通过 Gateway 生成反馈报告
+### Auto 和 Adjusted
 
-下面所有命令同样使用 8000 端口。将 `你的记录ID` 替换成钉钉 AI 表当前行的真实记录 ID。
+- 产品清单Auto：代码自动生成，只供下载检查。
+- 产品清单Adjusted：人工修正版本；存在时统计优先使用。
+- 统计任务不会把历史 Auto 当作下一次运行输入。
 
-#### 第一步：生成产品清单
+### 生成结果
 
-```bash
-curl -X POST http://127.0.0.1:8000/prepare-product-menu \
-  -H "Content-Type: application/json" \
-  -d '{"recordId":"你的记录ID"}'
-```
+- 新品周报：Excel、HTML、PNG
+- 外卖统计：美团、饿了么、京东 Excel
+- 社媒统计：消费者反馈 Excel
+- 最终报告：HTML、PDF
 
-该步骤会生成产品清单供人工检查上新日期。需要修改时，下载自动生成的清单，调整后上传到 AI 表的“产品清单Adjusted”。
+线上 HTTP 任务主要在临时目录生成，上传后清理。本机 outputs/ 主要用于手动命令和调试。
 
-#### 第二步：生成外卖统计数表
+## 7. 修改代码时从哪里开始
 
-```bash
-curl -X POST http://127.0.0.1:8000/generate-delivery-tables \
-  -H "Content-Type: application/json" \
-  -d '{"recordId":"你的记录ID"}'
-```
+| 要修改的内容 | 主要文件 |
+| --- | --- |
+| Gateway 路由、端口、HTTP 接收方式 | gateway/app.py |
+| 钉钉按钮对应的完整流程 | 各项目 service/jobs.py |
+| AI 表字段读取与回写 | service/dingtalk_table.py、config/field_mapping.json |
+| 钉钉文档目录和文件上传 | service/dingtalk_docs.py |
+| 周报数据筛选和 Excel | new-product-monitor/scripts/generate_weekly_report.py |
+| 周报 HTML/PNG | new-product-monitor/scripts/render_report_image.py |
+| 外卖合并、销量和门店数 | product-feedback-report/scripts/delivery/processing.py |
+| 外卖统计表 | product-feedback-report/scripts/delivery/generate_tables.py |
+| 社媒情感、标签和用户数 | product-feedback-report/scripts/social/processing.py |
+| 最终报告内容和样式 | product-feedback-report/scripts/reporting/html.py |
+| HTML 转 PDF | product-feedback-report/scripts/reporting/pdf.py |
+| 版式、字体和业务参数 | 各项目 config/*.json |
 
-运行前，AI 表当前行必须已经上传单个 `.xlsx` 外卖数据附件。
+修改统计规则时优先看 processing.py；修改钉钉流程时看 service/jobs.py；修改页面外观时看布局配置和渲染文件。
 
-#### 第三步：生成完整反馈报告
+## 8. 常见问题
 
-```bash
-curl -X POST http://127.0.0.1:8000/generate-report \
-  -H "Content-Type: application/json" \
-  -d '{"recordId":"你的记录ID"}'
-```
+### HTTP 200 但没有生成文件
 
-该步骤会读取当前行的外卖数据、可选的人工调整产品清单和社媒清洗数据，生成统计表及最终 HTML/PDF 报告，并上传到钉钉文档。
+多数生成接口是异步任务。HTTP 200 只代表 Gateway 接收成功，应继续查看 AI 表状态、“反馈信息”和 Gateway 终端日志。
 
-#### 第四步：检查完成后归档原始文件
+### /finalize-report 返回 HTTP 500
 
-```bash
-curl -X POST http://127.0.0.1:8000/finalize-report \
-  -H "Content-Type: application/json" \
-  -d '{"recordId":"你的记录ID"}'
-```
+归档接口是同步的。查看响应 detail 或终端中从 Traceback 到最后一行的完整错误。
 
-`/finalize-report` 是同步接口。等它返回 `HTTP 200` 后，才代表上传和字段回写全部完成。
+### 钉钉返回“工具调用准备失败，请稍后重试”
 
-#### 使用服务密钥调用
+错误来自钉钉 AI 表或 MCP 工具准备阶段，不是报告排版代码。可以先重试；持续出现时检查 MCP 服务和 AI 表权限。
 
-如果启动服务前设置了 `REPORT_SERVICE_SECRET`，每次请求都要传相同的 `secret`：
+### 8000 端口被占用
 
-```bash
-curl -X POST http://127.0.0.1:8000/generate-report \
-  -H "Content-Type: application/json" \
-  -d '{"recordId":"你的记录ID","secret":"你的服务密钥"}'
-```
+访问 http://127.0.0.1:8000/health。如果返回 weeklyRoot 和 feedbackRoot，说明已有 Gateway 在运行。
 
-### 不连接钉钉：使用本地文件调试反馈报告
+### 外卖统计数量异常
 
-以下命令也要在 `product-feedback-report/` 目录运行。把 `/path/to/...` 替换成真实文件或文件夹路径；路径含空格或中文时保留双引号。
+检查 scripts/delivery/processing.py 的分组键、最新日期筛选、同店同产品合并和门店去重规则。门店数按产品口径去重，销量可以合并同店同产品的多条链接。
 
-#### 1. 从样例文件夹生成产品清单
+### 报告缺少社媒内容
 
-```bash
-python -m scripts.delivery.prepare_product_menu \
-  --record-id local-test \
-  --input-dir "/path/to/样例文件夹" \
-  --report-date 2026-07-21
-```
+确认关注新品能匹配消费者反馈记录，且社媒CleanedRawData 只包含对应产品，并具备代码要求的平台工作表和字段。
 
-#### 2. 根据产品清单生成外卖数表
+### PNG 或 PDF 无法生成
 
-```bash
-python -m scripts.delivery.generate_tables \
-  --record-id local-test \
-  --input-dir "/path/to/样例文件夹" \
-  --annotation "outputs/local-test/产品清单及上新日期.xlsx"
-```
+周报 PNG 依赖 Chrome/Playwright；反馈报告 PDF 依赖 Chrome、Chromium 或 Edge 的无头打印。
 
-#### 3. 生成社媒统计数表
+## 9. 建议阅读顺序
 
-```bash
-python -m scripts.social.generate_tables \
-  --record-id local-test \
-  --brand "品牌名称" \
-  --product "新品名称" \
-  --start-date 6.10 \
-  --end-date 7.9 \
-  --cleaned-raw-data "/path/to/品牌-YYYYMMDD-新品-社媒清洗数据.xlsx"
-```
+1. 本 README 的整体架构和 HTTP 接口表。
+2. gateway/app.py，理解请求如何分发。
+3. 对应项目的 service/jobs.py，理解任务顺序。
+4. scripts/*/processing.py，理解统计规则。
+5. 报告渲染文件，理解最终呈现。
 
-#### 4. 使用已整理的数表生成最终报告
+先理解“入口 → 任务编排 → 数据处理 → 输出上传”这条主链路，再阅读配置细节。
 
-```bash
-python -m scripts.reporting.generate_report \
-  --record-id local-test \
-  --brand "品牌名称" \
-  --products "新品A,新品B" \
-  --report-date 2026-07-18 \
-  --meituan "/path/to/品牌-20260718-美团.xlsx" \
-  --eleme "/path/to/品牌-20260718-饿了么.xlsx" \
-  --jd "/path/to/品牌-20260718-京东.xlsx"
-```
+## 10. License
 
-未传 `--output-dir` 时，本地命令行生成结果默认写入 `product-feedback-report/outputs/`。
+本项目为内部专用项目，未授予任何公开开源许可。
 
-## 6. 可选：设置服务密钥
+仅限经项目所有者授权的内部成员在工作范围内查看和使用。未经项目所有者书面授权，不得复制、修改、分发、公开发布、转授权、销售或用于任何商业用途，也不得将项目代码、配置、数据或生成结果上传至未经批准的外部平台。
 
-服务支持通过环境变量设置请求密钥：
-
-```bash
-export REPORT_SERVICE_SECRET="请替换为安全的随机字符串"
-```
-
-设置后，请求体也需要携带相同的 `secret`：
-
-```json
-{
-  "recordId": "你的记录ID",
-  "secret": "请替换为安全的随机字符串"
-}
-```
-
-如果使用 ngrok 将服务暴露到公网，强烈建议设置密钥。
-
-## 7. 私密配置与内部资源
-
-以下内容不应提交到公开仓库：
-
-- `config/dingtalk.json`
-- `config/dingtalk_docs.json`
-- `.env`
-- Streamable HTTP URL 和访问令牌
-- 内部字体、Logo 和其他授权资产
-- 自动生成的报告文件
-
-提交前建议执行：
-
-```bash
-git status
-git diff --cached
-```
-
-确认没有密钥、令牌或内部文件后再推送。
-
-## 常见问题
-
-### `ModuleNotFoundError`
-
-确认已经进入正确的模块目录、激活对应的 `.venv`，并执行：
-
-```bash
-pip install -r requirements.txt
-```
-
-### 8000 端口已被占用
-
-先检查是否已有 Gateway 在运行：
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-如果能够返回 `weeklyRoot` 和 `feedbackRoot`，直接使用现有 Gateway，不要重复启动。需要停止当前终端中的服务时按 `Control + C`，然后重新运行：
-
-```bash
-uvicorn gateway.app:app --host 0.0.0.0 --port 8000
-```
-
-### PNG 无法生成
-
-确认 Chrome 和 Playwright Chromium 已安装：
-
-```bash
-python -m playwright install chromium
-```
-
-### 钉钉数据读取失败
-
-检查：
-
-1. `config/dingtalk.json` 中的 `baseId` 和 `tableId`
-2. Streamable HTTP URL 是否有效
-3. `mcporter` 是否已配置并可用
-4. 当前账号是否有目标 AI 表的访问权限
-
-## License
-
-本项目暂未声明开源许可证。在添加许可证前，请勿默认复制、分发或用于商业用途。
+Copyright © 2026 cheryl-KXH. All rights reserved.
