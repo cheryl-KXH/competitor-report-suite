@@ -22,7 +22,22 @@ DATA_NOT_READY_ATTEMPTS = 8
 DATA_NOT_READY_DELAY_SECONDS = 1.0
 DATA_NOT_READY_CODE = "InvalidRequest.DataNotReady"
 RETRYABLE_TABLE_TOOLS = {"query_records", "get_fields", "update_records"}
-TRANSIENT_TABLE_ERROR_TEXTS = ("请求超时", "request timeout", "timed out", "timeout")
+TRANSIENT_TABLE_ERROR_CODES = {
+    DATA_NOT_READY_CODE,
+    "SCAN_RECORDS_FAILED",
+}
+TRANSIENT_TABLE_ERROR_TYPES = {"SYSTEM_ERROR"}
+TRANSIENT_TABLE_ERROR_TEXTS = (
+    "请求超时",
+    "request timeout",
+    "timed out",
+    "timeout",
+    "downstream service invocation",
+    "failed to check if notable core api is enabled",
+    "scan_records_failed",
+    "system_error",
+)
+TABLE_RETRY_MAX_DELAY_SECONDS = 8.0
 
 
 @dataclass
@@ -55,18 +70,28 @@ def parse_mcporter_json(stdout: str) -> dict[str, Any]:
 
 def _is_retryable_table_error(error: Any) -> bool:
     if isinstance(error, dict):
-        if (
-            str(error.get("code") or "") == DATA_NOT_READY_CODE
-            and error.get("retryable") is True
-        ):
+        if error.get("retryable") is True:
+            return True
+        code = str(error.get("code") or "")
+        error_type = str(error.get("type") or "")
+        if code in TRANSIENT_TABLE_ERROR_CODES or error_type in TRANSIENT_TABLE_ERROR_TYPES:
             return True
         detail = " ".join(
-            str(error.get(key) or "") for key in ("code", "message", "detail")
+            str(error.get(key) or "")
+            for key in ("code", "type", "message", "detail")
         )
     else:
         detail = str(error or "")
     lowered = detail.lower()
     return any(text in lowered for text in TRANSIENT_TABLE_ERROR_TEXTS)
+
+
+def _table_retry_delay(attempt: int) -> float:
+    """Return a capped 1, 2, 4, 8... second retry delay."""
+    return min(
+        DATA_NOT_READY_DELAY_SECONDS * (2**attempt),
+        TABLE_RETRY_MAX_DELAY_SECONDS,
+    )
 
 
 def call_table_tool(config: dict[str, Any], tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -78,8 +103,25 @@ def call_table_tool(config: dict[str, Any], tool_name: str, payload: dict[str, A
         except FileNotFoundError as exc:
             raise RuntimeError("找不到 mcporter，请先安装并配置 dingtalk-ai-table。") from exc
         if result.returncode != 0:
-            raise RuntimeError(f"钉钉 AI 表调用失败：{result.stderr.strip() or result.stdout.strip()}")
-        data = parse_mcporter_json(result.stdout)
+            detail = result.stderr.strip() or result.stdout.strip()
+            if (
+                tool_name in RETRYABLE_TABLE_TOOLS
+                and _is_retryable_table_error(detail)
+                and attempt + 1 < attempts
+            ):
+                time.sleep(_table_retry_delay(attempt))
+                continue
+            raise RuntimeError(f"钉钉 AI 表调用失败：{detail}")
+        try:
+            data = parse_mcporter_json(result.stdout)
+        except json.JSONDecodeError as exc:
+            if tool_name in RETRYABLE_TABLE_TOOLS and attempt + 1 < attempts:
+                time.sleep(_table_retry_delay(attempt))
+                continue
+            raise RuntimeError(
+                "钉钉 AI 表返回内容不是有效 JSON，自动重试后仍无法解析"
+                f"（{exc.msg}: line {exc.lineno} column {exc.colno}）"
+            ) from exc
         status = data.get("status")
         if status in ("success", "ok") or (status is None and "error" not in data):
             return data
@@ -89,7 +131,7 @@ def call_table_tool(config: dict[str, Any], tool_name: str, payload: dict[str, A
             and _is_retryable_table_error(error)
             and attempt + 1 < attempts
         ):
-            time.sleep(DATA_NOT_READY_DELAY_SECONDS)
+            time.sleep(_table_retry_delay(attempt))
             continue
         raise RuntimeError(
             f"钉钉 AI 表返回失败：{json.dumps(error, ensure_ascii=False)}"

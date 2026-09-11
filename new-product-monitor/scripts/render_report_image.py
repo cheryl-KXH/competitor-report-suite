@@ -575,8 +575,8 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
 .product-image {{ display: block; max-height: {details['imageHeightPx']}px; max-width: {details['imageMaxWidthPx']}px; margin: 0 auto; object-fit: contain; }}
 .strike {{ text-decoration: line-through; }}
 @media (min-width: 768px) {{
-  html, body {{ background: #f2f2f0; }}
-  .report-viewport {{ margin: 24px auto; background: #{colors['white']}; box-shadow: 0 2px 18px rgba(0, 0, 0, .08); }}
+  html, body {{ background:  #FFFFFF; }}
+  .report-viewport {{ margin: 0 auto; background: #{colors['white']}; box-shadow: none; }}
 }}
 @media (max-width: 767px) {{
   html, body {{ width: 100%; min-width: 0; overflow-x: hidden; background: #{colors['white']}; }}

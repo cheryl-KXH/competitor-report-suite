@@ -98,7 +98,9 @@ def _date_value(value: Any) -> date | None:
             return None
 
 
-def _query_product_source(configs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _query_product_source(
+    configs: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
     source = configs.get("report_rules", {}).get("productInfoSource", {})
     base_id = str(source.get("baseId") or "").strip()
     table_id = str(source.get("tableId") or "").strip()
@@ -111,27 +113,53 @@ def _query_product_source(configs: dict[str, dict[str, Any]]) -> list[dict[str, 
         *[str(meta.get("fieldId")) for meta in fields.values() if meta.get("fieldId")],
     ]
     records: list[dict[str, Any]] = []
+    warnings: list[str] = []
     cursor = ""
     seen: set[str] = set()
+    page_number = 1
+    try:
+        page_size = int(source.get("pageSize") or 50)
+    except (TypeError, ValueError):
+        page_size = 50
+    page_size = min(max(page_size, 1), 100)
     while True:
         payload: dict[str, Any] = {
             "baseId": base_id,
             "tableId": table_id,
-            "limit": 100,
+            "limit": page_size,
             "fieldIds": list(dict.fromkeys(field_ids)),
         }
         if cursor:
             payload["cursor"] = cursor
-        response = dingtalk_table.call_table_tool(configs["dingtalk"], "query_records", payload)
+        try:
+            response = dingtalk_table.call_table_tool(
+                configs["dingtalk"], "query_records", payload
+            )
+        except Exception as exc:
+            location = f"第 {page_number} 页"
+            if cursor:
+                location += f"（cursor={cursor}）"
+            if not records:
+                raise RuntimeError(f"周报产品信息源表{location}读取失败：{exc}") from exc
+            warnings.append(
+                f"周报产品信息源表{location}读取失败，仅使用此前成功读取的数据（{exc}）"
+            )
+            break
         data = response.get("data", {}) if isinstance(response, dict) else {}
         batch = data.get("records", []) if isinstance(data, dict) else []
         records.extend(batch or [])
         next_cursor = str(data.get("nextCursor") or "") if isinstance(data, dict) else ""
-        if not next_cursor or next_cursor in seen or not batch:
+        if not next_cursor or not batch:
+            break
+        if next_cursor in seen:
+            warnings.append(
+                f"周报产品信息源表第 {page_number} 页返回重复 cursor，已停止继续读取"
+            )
             break
         seen.add(next_cursor)
         cursor = next_cursor
-    return records
+        page_number += 1
+    return records, warnings
 
 
 def load_product_infos(
@@ -145,9 +173,8 @@ def load_product_infos(
     brand_field = str(source.get("brandFieldId") or "01ZM8y7")
     launch_field = str(source.get("launchDateFieldId") or "mKUEya0")
     product_field = str(fields.get("productName", {}).get("fieldId") or "mHe1U1b")
-    records = _query_product_source(configs)
+    records, warnings = _query_product_source(configs)
     infos: dict[str, ProductInfo] = {}
-    warnings: list[str] = []
     for product in products:
         target = normalize_product_key(product)
         candidates: list[tuple[dict[str, Any], date | None]] = []

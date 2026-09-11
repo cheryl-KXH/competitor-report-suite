@@ -787,9 +787,14 @@ def _social_summary_html(social: SocialReport | None) -> str:
     period = f"（{_escape(social.period)}）" if social.period else ""
     if not social.total_users:
         return f'<p>上市30日{period}暂未获取到有效第三方评论。</p>'
+    positive_rate_text = (
+        f'，好评率为 {_format_positive_rate(social.positive_rate)}'
+        if social.total_users >= 50
+        else ""
+    )
     return (
-        f'<p class="social-summary">上市30日{period}第三方评论共 {_format_count(social.total_users)} 条，'
-        f'好评率为 {_format_positive_rate(social.positive_rate)}：<br>'
+        f'<p class="social-summary">上市30日{period}第三方评论共 {_format_count(social.total_users)} 条'
+        f'{positive_rate_text}：<br>'
         f'好评（{_format_count(social.positive_users)} 条）主要提及关键词：{_escape(_top_labels(social.positive_top))}；<br>'
         f'差评（{_format_count(social.negative_users)} 条）主要提及关键词：{_escape(_top_labels(social.negative_top))}。</p>'
     )
