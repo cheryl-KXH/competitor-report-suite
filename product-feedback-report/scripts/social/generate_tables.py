@@ -37,6 +37,7 @@ def generate_consumer_feedback_tables(
         end_date=end_date,
         summaries=summaries,
         output_dir=out_dir,
+        raw_data_path=cleaned_raw_data,
     )
 
 

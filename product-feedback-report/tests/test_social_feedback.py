@@ -9,7 +9,7 @@ from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Border, PatternFill, Side
 
 from scripts.social.processing import (
     PlatformSummary,
@@ -368,6 +368,150 @@ class SocialFeedbackStatisticsTests(unittest.TestCase):
         self.assertEqual(by_key["weibo"].negative_tags, (("味道怪", 1),))
         self.assertEqual((by_key["bilibili"].positive_users, by_key["bilibili"].negative_users), (0, 0))
 
+    def test_mixed_platform_sheet_is_split_into_raw_sheets_after_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "混合平台.xlsx"
+            workbook = Workbook()
+            screenshot = workbook.active
+            screenshot.title = "大众点评-截图"
+            screenshot["A1"] = "截图原始数据"
+            screenshot["A1"].fill = PatternFill("solid", fgColor="FFF2CC")
+            dianping = workbook.create_sheet("大众点评")
+            dianping.append([None, "大众点评好评", "评论数", "大众点评差评", "评论数"])
+            dianping.append([None, "清爽", 2, "太甜", 1])
+            dianping.append([None, "好评用户数", 2, "差评用户数", 1])
+            mixed = workbook.create_sheet("全平台原始数据")
+            mixed.append(
+                ["品牌", "产品名称", "站点", "内容", "情感识别", "评价1-对应标签"]
+            )
+            mixed.append(["品牌", "新品", "微博", "W", "正向", "好喝"])
+            mixed.append(["品牌", "新品", "小红书", "X", "负向", "太甜"])
+            mixed.append(["品牌", "新品", "抖音app", "D", "正向", "清爽"])
+            mixed.append(["品牌", "新品", "B站", "B", "负向", "味道怪"])
+            mixed["A1"].fill = PatternFill("solid", fgColor="FF0000")
+            mixed.column_dimensions["D"].width = 36
+            workbook.save(source)
+
+            summaries = summarize_social_cleaned_workbook(source)
+            output = build_social_feedback_workbook(
+                brand="测试品牌",
+                product="新品",
+                start_date="6.1",
+                end_date="6.30",
+                summaries=summaries,
+                output_dir=root,
+                raw_data_path=source,
+            )
+
+            result = load_workbook(output, data_only=False)
+            try:
+                self.assertEqual(
+                    result.sheetnames,
+                    ["新品", "大众点评-截图", "大众点评", "微博", "小红书", "抖音", "B站"],
+                )
+                expected_sites = {
+                    "微博": "微博",
+                    "小红书": "小红书",
+                    "抖音": "抖音app",
+                    "B站": "B站",
+                }
+                for sheet_name, site in expected_sites.items():
+                    sheet = result[sheet_name]
+                    self.assertEqual(sheet["C2"].value, site)
+                    self.assertIsNone(sheet["C3"].value)
+                    self.assertEqual(sheet["A1"].fill.fgColor.rgb, "00FF0000")
+                    self.assertEqual(sheet.column_dimensions["D"].width, 36)
+                self.assertEqual(result["大众点评-截图"]["A1"].value, "截图原始数据")
+                self.assertEqual(
+                    result["大众点评-截图"]["A1"].fill.fgColor.rgb,
+                    "00FFF2CC",
+                )
+            finally:
+                result.close()
+
+    def test_raw_sheets_copy_only_populated_rows_and_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _write_cleaned_social_workbook(
+                root / "预格式空白行.xlsx", "新品"
+            )
+            workbook = load_workbook(source)
+            try:
+                thin = Side(style="thin", color="404040")
+                border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                gray = PatternFill("solid", fgColor="D9D9D9")
+                xiaohongshu = workbook["小红书"]
+                for column in ("A", "B", "C", "D", "E", "F"):
+                    xiaohongshu.column_dimensions[column].fill = gray
+                    xiaohongshu.column_dimensions[column].border = border
+                for row in xiaohongshu.iter_rows(
+                    min_row=3, max_row=30, min_col=1, max_col=20
+                ):
+                    for cell in row:
+                        cell.fill = gray
+                        cell.border = border
+                dianping = workbook["大众点评"]
+                dianping["A1"] = "新品 6.1-6.30 第三方平台评价反馈"
+                for cell in dianping[1]:
+                    cell.fill = gray
+                    cell.border = border
+                dianping["D3"] = "/"
+                dianping["E3"] = None
+                dianping.merge_cells("D3:E3")
+                workbook.save(source)
+            finally:
+                workbook.close()
+
+            summaries = summarize_social_cleaned_workbook(source)
+            output = build_social_feedback_workbook(
+                brand="测试品牌",
+                product="新品",
+                start_date="6.1",
+                end_date="6.30",
+                summaries=summaries,
+                output_dir=root,
+                raw_data_path=source,
+            )
+
+            result = load_workbook(output, data_only=False)
+            try:
+                xiaohongshu = result["小红书"]
+                self.assertEqual(xiaohongshu.max_row, 2)
+                self.assertEqual(xiaohongshu.max_column, 6)
+                self.assertIsNone(xiaohongshu["A3"].value)
+                self.assertEqual(xiaohongshu["A3"].fill.fill_type, None)
+                self.assertEqual(xiaohongshu["A3"].border.left.style, None)
+                self.assertEqual(
+                    xiaohongshu.column_dimensions["A"].fill.fill_type, None
+                )
+                self.assertEqual(
+                    xiaohongshu.column_dimensions["A"].border.left.style, None
+                )
+
+                dianping = result["大众点评"]
+                self.assertEqual(dianping.max_row, 3)
+                self.assertEqual(dianping["B1"].value, "大众点评好评")
+                self.assertNotIn(
+                    "第三方平台评价反馈",
+                    [cell.value for cell in dianping[1]],
+                )
+                self.assertEqual(dianping["A4"].fill.fill_type, None)
+                self.assertEqual(dianping["A4"].border.left.style, None)
+                self.assertIsNone(dianping["D2"].value)
+                self.assertIsNone(dianping["E2"].value)
+                self.assertEqual(tuple(dianping.merged_cells.ranges), ())
+                for row in dianping.iter_rows(
+                    min_row=1, max_row=3, min_col=2, max_col=5
+                ):
+                    for cell in row:
+                        self.assertEqual(cell.border.left.style, "thin")
+                        self.assertEqual(cell.border.right.style, "thin")
+                        self.assertEqual(cell.border.top.style, "thin")
+                        self.assertEqual(cell.border.bottom.style, "thin")
+            finally:
+                result.close()
+
     def test_cleaned_workbook_product_and_archive_filename_follow_new_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = _write_cleaned_social_workbook(
@@ -520,13 +664,13 @@ class SocialFeedbackJobTests(unittest.TestCase):
     def test_consumer_table_mapping_uses_current_social_fields(self) -> None:
         configs = _consumer_feedback_configs({"dingtalk": {"tableId": "old"}})
         fields = configs["field_mapping"]["fields"]
-        self.assertEqual(configs["dingtalk"]["tableId"], "hvcu7Bw")
+        self.assertEqual(configs["dingtalk"]["tableId"], "cARtK3w")
         self.assertEqual(fields["launchDate"]["fieldId"], "mKUEya0")
-        self.assertEqual(fields["day30"]["fieldId"], "SSrz1N1")
-        self.assertEqual(fields["report"]["fieldId"], "amWTton")
+        self.assertEqual(fields["day30"]["fieldId"], "8dgeSOM")
+        self.assertEqual(fields["report"]["fieldId"], "amlWozg")
         self.assertEqual(fields["report"]["cellType"], "link")
-        self.assertEqual(fields["feedback"]["fieldId"], "j8IgB7P")
-        self.assertEqual(fields["socialCleanedRawData"]["fieldId"], "Q4mbLWx")
+        self.assertNotIn("feedback", fields)
+        self.assertEqual(fields["socialCleanedRawData"]["fieldId"], "n9mBrWx")
         for old_platform in ("dianping", "weibo", "xiaohongshu", "douyin", "bilibili"):
             self.assertNotIn(old_platform, fields)
         self.assertNotIn("allData", fields)

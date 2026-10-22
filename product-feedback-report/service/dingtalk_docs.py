@@ -35,7 +35,15 @@ def _selector(config: dict[str, Any], tool_name: str) -> list[str]:
 def call_docs_tool(config: dict[str, Any], tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     cmd = _selector(config, tool_name) + ["--args", json.dumps(payload, ensure_ascii=False)]
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=dingtalk_table.mcporter_subprocess_env(),
+        )
     except FileNotFoundError as exc:
         raise RuntimeError("找不到 mcporter，请先安装并配置钉钉文档 MCP。") from exc
     if result.returncode != 0:

@@ -54,6 +54,84 @@ def nested_calc_not_ready_result() -> CompletedProcess[str]:
 
 
 class DingTalkQueryRetryTests(unittest.TestCase):
+    def test_query_retries_json_containing_replacement_character(self) -> None:
+        corrupted = command_result(
+            {
+                "status": "success",
+                "data": {
+                    "records": [
+                        {
+                            "recordId": "rec-1",
+                            "cells": {"sellingPoint": "Q弹\ufffd\ufffd西米"},
+                        }
+                    ]
+                },
+            }
+        )
+        success = command_result(
+            {
+                "status": "success",
+                "data": {
+                    "records": [
+                        {
+                            "recordId": "rec-1",
+                            "cells": {"sellingPoint": "Q弹小西米"},
+                        }
+                    ]
+                },
+            }
+        )
+        with patch.object(
+            weekly_report.subprocess,
+            "run",
+            side_effect=[corrupted, success],
+        ) as run_mock:
+            with patch.object(weekly_report.time, "sleep") as sleep_mock:
+                result = weekly_report.call_dingtalk_tool(
+                    {}, "query_records", {"limit": 20}
+                )
+
+        self.assertEqual(
+            result["data"]["records"][0]["cells"]["sellingPoint"],
+            "Q弹小西米",
+        )
+        self.assertEqual(run_mock.call_count, 2)
+        sleep_mock.assert_not_called()
+        repair_args = json.loads(run_mock.call_args.args[0][-1])
+        self.assertEqual(repair_args["recordIds"], ["rec-1"])
+
+    def test_query_retries_truncated_json_and_uses_safe_mcporter_environment(self) -> None:
+        truncated = CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"status":"success","data":{"records":[',
+            stderr="",
+        )
+        success = command_result(
+            {
+                "status": "success",
+                "data": {"records": [{"recordId": "rec-1", "cells": {}}]},
+            }
+        )
+        with patch.object(
+            weekly_report.subprocess,
+            "run",
+            side_effect=[truncated, success],
+        ) as run_mock:
+            with patch.object(weekly_report.time, "sleep") as sleep_mock:
+                result = weekly_report.call_dingtalk_tool(
+                    {}, "query_records", {"limit": 20}
+                )
+
+        self.assertEqual(result["data"]["records"][0]["recordId"], "rec-1")
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(run_mock.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run_mock.call_args.kwargs["errors"], "replace")
+        self.assertEqual(
+            run_mock.call_args.kwargs["env"]["MCPORTER_NO_FORCE_EXIT"], "1"
+        )
+        sleep_mock.assert_called_once_with(1.0)
+
     def test_query_retries_retryable_failure_then_returns_records(self) -> None:
         success = command_result(
             {
@@ -197,6 +275,53 @@ class DingTalkQueryRetryTests(unittest.TestCase):
 
 
 class ResponsiveHtmlTests(unittest.TestCase):
+    def test_long_screenshot_is_kept_below_preview_texture_limit(self) -> None:
+        from PIL import Image
+
+        source = Image.new("RGB", (1344, 20000), "white")
+        constrained = report_image.constrain_output_image_height(source, 16000)
+
+        self.assertEqual(constrained.size, (1075, 16000))
+        source.close()
+        constrained.close()
+
+    def test_short_screenshot_is_not_resampled(self) -> None:
+        from PIL import Image
+
+        source = Image.new("RGB", (1344, 12000), "white")
+        constrained = report_image.constrain_output_image_height(source, 16000)
+
+        self.assertIs(constrained, source)
+        source.close()
+
+    def test_screenshot_chunks_verify_each_scroll_position(self) -> None:
+        source = Path(report_image.__file__).read_text(encoding="utf-8")
+
+        self.assertIn("window.scrollTo(0, targetY)", source)
+        self.assertIn("周报截图滚动位置异常", source)
+
+    def test_price_without_slash_stays_on_one_line(self) -> None:
+        rendered = report_image.render_price_html("18.48元(21元)", True)
+
+        self.assertNotIn("<br>", rendered)
+        self.assertNotIn("<wbr>", rendered)
+        self.assertIn('<span class="strike">21元</span>', rendered)
+        self.assertEqual(
+            report_image.safe_price_width_segments("18.48元(21元)"),
+            ["18.48元(21元)"],
+        )
+        self.assertEqual(
+            report_image.estimate_price_lines("18.48元(21元)", 72, 12),
+            1,
+        )
+
+    def test_price_with_slash_keeps_explicit_slash_break(self) -> None:
+        rendered = report_image.render_price_html(
+            "12.64元(16元)(中杯)/15.01元(19元)(大杯)", True
+        )
+
+        self.assertIn("/<br>", rendered)
+
     def test_html_uses_width_only_breakpoints_and_mobile_vertical_pan(self) -> None:
         source = Path(report_image.__file__).read_text(encoding="utf-8")
 
@@ -235,6 +360,56 @@ class ResponsiveHtmlTests(unittest.TestCase):
             source,
         )
         self.assertNotIn(".summary-table tr.line-count-", source)
+
+
+class RemarkRuleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.rules = weekly_report.load_configs()["report_rules"]
+
+    def test_plain_launch_is_not_shown_in_remark(self) -> None:
+        self.assertEqual(
+            weekly_report.compute_remark({"returnStatus": ["上新"]}, self.rules),
+            "/",
+        )
+
+    def test_each_visible_launch_type_is_shown(self) -> None:
+        for label in ("回归", "经典回归"):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    weekly_report.compute_remark(
+                        {"returnStatus": [label]}, self.rules
+                    ),
+                    label,
+                )
+
+    def test_series_launch_is_hidden_and_classic_return_suppresses_return(self) -> None:
+        self.assertEqual(
+            weekly_report.compute_remark(
+                {
+                    "returnStatus": ["上新", "系列上新", "回归", "经典回归"],
+                    "collaboration": "品牌IP",
+                    "remark": "限时",
+                },
+                self.rules,
+            ),
+            "经典回归，品牌IP联名，限时",
+        )
+
+    def test_series_launch_is_hidden_when_return_is_present(self) -> None:
+        self.assertEqual(
+            weekly_report.compute_remark(
+                {"returnStatus": ["系列上新", "回归"]}, self.rules
+            ),
+            "回归",
+        )
+
+    def test_series_launch_alone_is_not_shown(self) -> None:
+        self.assertEqual(
+            weekly_report.compute_remark(
+                {"returnStatus": ["系列上新"]}, self.rules
+            ),
+            "/",
+        )
 
 
 if __name__ == "__main__":

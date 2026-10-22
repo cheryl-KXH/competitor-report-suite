@@ -69,7 +69,7 @@
       "required": false
     },
     "returnStatus": {
-      "label": "回归",
+      "label": "上新类型",
       "fieldId": "nIh71Bo",
       "extract": "generic",
       "required": false

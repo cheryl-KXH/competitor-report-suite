@@ -22,6 +22,7 @@ FUTURE_LAUNCH_TOLERANCE_DAYS = 2
 RECENT_LAUNCH_HEADER = "近30日上新日期"
 ANNOTATION_HEADERS = ["平台", "品牌", "产品", RECENT_LAUNCH_HEADER]
 MANUAL_AVAILABILITY_STATUSES = ("提前下架", "外卖无售")
+DELIVERY_PLATFORM_GROUPS = ("美团", "饿了么", "京东")
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,99 @@ def find_delivery_rows(input_dir: Path) -> list[RawSaleRow]:
     return all_rows
 
 
+def has_delivery_sheet(input_dir: Path) -> bool:
+    """Return whether an input workbook has a recognizable delivery header."""
+    for path in find_workbooks(input_dir):
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            if any(looks_like_delivery_sheet(ws) for ws in wb.worksheets):
+                return True
+        finally:
+            wb.close()
+    return False
+
+
+def validate_empty_delivery_annotations(
+    rows: list[AnnotationRow],
+    brand: str = "",
+    products: Iterable[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Validate manual statuses that explicitly explain an empty delivery source."""
+    matching_brands = {
+        row.brand for row in rows if row.brand and (not brand or row.brand == brand)
+    }
+    resolved_brand = brand or (
+        next(iter(matching_brands)) if len(matching_brands) == 1 else ""
+    )
+    if not resolved_brand:
+        raise RuntimeError("外卖数据为空或只有表头，且人工产品清单中无法确定唯一品牌。")
+
+    resolved_products = [normalize_text(product) for product in (products or [])]
+    resolved_products = list(
+        dict.fromkeys(product for product in resolved_products if product)
+    )
+    if not resolved_products:
+        resolved_products = list(
+            dict.fromkeys(
+                row.product
+                for row in rows
+                if row.product and (not row.brand or row.brand == resolved_brand)
+            )
+        )
+    if not resolved_products:
+        raise RuntimeError("外卖数据为空或只有表头，且人工产品清单中没有关注新品。")
+
+    statuses: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if row.brand and row.brand != resolved_brand:
+            continue
+        platform = _platform_group(row.platform)
+        if platform not in DELIVERY_PLATFORM_GROUPS or not row.manual_status:
+            continue
+        key = (platform, normalize_product_key(row.product))
+        previous = statuses.get(key)
+        if previous and previous != row.manual_status:
+            raise RuntimeError(
+                f"产品“{row.product}”在{platform}同时标注了“{previous}”和“{row.manual_status}”。"
+            )
+        statuses[key] = row.manual_status
+
+    missing = [
+        f"{platform}/{product}"
+        for product in resolved_products
+        for platform in DELIVERY_PLATFORM_GROUPS
+        if statuses.get((platform, normalize_product_key(product)))
+        not in MANUAL_AVAILABILITY_STATUSES
+    ]
+    if missing:
+        raise RuntimeError(
+            "外卖数据为空或只有表头时，人工产品清单必须为每个关注新品在美团、"
+            "饿了么、京东分别标注“提前下架”或“外卖无售”；缺少："
+            + "、".join(missing)
+        )
+    return resolved_brand, resolved_products
+
+
+def all_delivery_products_no_sale(
+    rows: list[AnnotationRow], brand: str, products: Iterable[str]
+) -> bool:
+    expected = {
+        (platform, normalize_product_key(product))
+        for product in products
+        if normalize_product_key(product)
+        for platform in DELIVERY_PLATFORM_GROUPS
+    }
+    if not expected:
+        return False
+    declared = {
+        (_platform_group(row.platform), normalize_product_key(row.product))
+        for row in rows
+        if row.manual_status == "外卖无售"
+        and (not row.brand or row.brand == brand)
+    }
+    return expected.issubset(declared)
+
+
 def style_sheet(ws) -> None:
     header_fill = PatternFill("solid", fgColor="D9E2F3")
     for cell in ws[1]:
@@ -267,12 +361,23 @@ def read_annotation(path: Path) -> list[AnnotationRow]:
 
 
 def tracked_product_statuses(
-    rows: list[AnnotationRow], brand: str, products: list[str]
+    rows: list[AnnotationRow],
+    brand: str,
+    products: list[str],
+    *,
+    platforms: Iterable[str] | None = None,
 ) -> dict[str, str]:
     requested = {normalize_product_key(product): product for product in products}
+    platform_groups = (
+        {_platform_group(platform) for platform in platforms}
+        if platforms is not None
+        else None
+    )
     statuses: dict[str, str] = {}
     for row in rows:
         if not row.manual_status or (row.brand and row.brand != brand):
+            continue
+        if platform_groups is not None and _platform_group(row.platform) not in platform_groups:
             continue
         key = normalize_product_key(row.product)
         product = requested.get(key)

@@ -21,9 +21,12 @@ from scripts.reporting.html import (
     ReportBuildResult,
     SocialReport,
     build_report_html,
+    combine_delivery_sales,
     normalize_product_key,
+    read_jd_sales,
 )
 from scripts.reporting.pdf import render_html_to_pdf
+from scripts.reporting.word import build_report_docx
 
 
 def _safe_filename(value: str) -> str:
@@ -218,6 +221,8 @@ def generate_report(
     launch_dates: dict[str, date | None] | None = None,
     new_product_dates: dict[str, date] | None = None,
     delivery_statuses: dict[str, str] | None = None,
+    jd_early_delisted_products: list[str] | None = None,
+    hide_delivery_modules: bool = False,
     output_dir: Path | None = None,
     configs: dict[str, dict[str, Any]] | None = None,
     delivery_report: DeliveryReport | None = None,
@@ -237,6 +242,15 @@ def generate_report(
     except Exception as exc:
         product_infos = {}
         product_warnings = [f"周报产品信息读取失败（{exc}）"]
+    if delivery_report is None:
+        if not meituan_path or not eleme_path:
+            raise RuntimeError("生成报告缺少美团或饿了么数据。")
+        effective_delivery_report = combine_delivery_sales(
+            meituan_path, eleme_path, products
+        )
+    else:
+        effective_delivery_report = delivery_report
+    effective_jd_report = jd_report or read_jd_sales(jd_path)
     out_dir = output_dir or output_root(configs) / record_id
     filename = _safe_filename(f"{brand}：{'、'.join(products)} {report_date:%Y%m%d}.html")
     result = build_report_html(
@@ -252,10 +266,12 @@ def generate_report(
         launch_dates=launch_dates,
         new_product_dates=new_product_dates,
         delivery_statuses=delivery_statuses,
+        jd_early_delisted_products=jd_early_delisted_products,
+        hide_delivery_modules=hide_delivery_modules,
         output_path=out_dir / filename,
         configs=configs,
-        delivery_report=delivery_report,
-        jd_report=jd_report,
+        delivery_report=effective_delivery_report,
+        jd_report=effective_jd_report,
         social_report_models=social_reports,
     )
     pdf_path = render_html_to_pdf(
@@ -263,15 +279,34 @@ def generate_report(
         result.path.with_suffix(".pdf"),
         config=configs.get("report_rules", {}).get("pdf", {}),
     )
+    docx_path, docx_warnings = build_report_docx(
+        title=configs.get("report_rules", {}).get("reportTitle", "竞品跟踪反馈报告"),
+        brand=brand,
+        products=products,
+        report_date=report_date,
+        product_infos=product_infos,
+        launch_dates=launch_dates,
+        output_path=result.path.with_suffix(".docx"),
+        configs=configs,
+        delivery_report=effective_delivery_report,
+        jd_report=effective_jd_report,
+        social_reports=social_reports or {},
+        social_paths=social_paths,
+        delivery_statuses=delivery_statuses,
+        jd_early_delisted_products=jd_early_delisted_products,
+        hide_delivery_modules=hide_delivery_modules,
+        new_product_dates=new_product_dates,
+    )
     return ReportBuildResult(
         result.path,
-        tuple(dict.fromkeys([*product_warnings, *result.warnings])),
+        tuple(dict.fromkeys([*product_warnings, *result.warnings, *docx_warnings])),
         pdf_path,
+        docx_path,
     )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="生成 HTML 和 PDF 竞品跟踪反馈报告")
+    parser = argparse.ArgumentParser(description="生成 HTML、PDF 和 Word 竞品跟踪反馈报告")
     parser.add_argument("--record-id", required=True)
     parser.add_argument("--brand", required=True)
     parser.add_argument("--products", required=True, help="多个产品用英文或中文逗号分隔")
@@ -298,6 +333,7 @@ def main() -> int:
     )
     print(f"已生成 HTML：{result.path}")
     print(f"已生成 PDF：{result.pdf_path}")
+    print(f"已生成 Word：{result.docx_path}")
     for warning in result.warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
     return 0

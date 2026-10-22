@@ -71,6 +71,8 @@
   },
   "render": {
     "deviceScaleFactor": 2,
+    "maxScreenshotChunkHeightPx": 4000,
+    "maxOutputHeightPx": 16000,
     "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   }
 }

@@ -12,6 +12,7 @@ from scripts.delivery.processing import (
     RawSaleRow,
     _annotation_lookup,
     _store_sale_days,
+    all_delivery_products_no_sale,
     generate_jd_summary,
     generate_platform_delivery_summary,
     read_annotation,
@@ -51,6 +52,20 @@ def annotation(
 
 
 class DeliveryStatisticsTests(unittest.TestCase):
+    def test_all_delivery_products_no_sale_requires_every_platform(self) -> None:
+        rows = [
+            AnnotationRow(platform, "品牌A", product, None, "外卖无售")
+            for product in ("新品A", "新品B")
+            for platform in ("美团", "饿了么", "京东秒送")
+        ]
+
+        self.assertTrue(
+            all_delivery_products_no_sale(rows, "品牌A", ["新品A", "新品B"])
+        )
+        self.assertFalse(
+            all_delivery_products_no_sale(rows[:-1], "品牌A", ["新品A", "新品B"])
+        )
+
     def test_product_menu_offers_manual_statuses_and_reads_them(self) -> None:
         rows = [sale("美团", "门店1", "在售产品", 10, date(2026, 7, 10))]
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,6 +91,22 @@ class DeliveryStatisticsTests(unittest.TestCase):
                 annotations, "品牌A", ["缺失产品A", "缺失产品B"]
             ),
             {"缺失产品A": "提前下架", "缺失产品B": "外卖无售"},
+        )
+
+    def test_tracked_statuses_can_be_limited_to_meituan_and_eleme(self) -> None:
+        annotations = [
+            AnnotationRow("京东外卖", "品牌A", "新品A", None, "提前下架"),
+            AnnotationRow("美团外卖", "品牌A", "新品B", None, "外卖无售"),
+        ]
+
+        self.assertEqual(
+            tracked_product_statuses(
+                annotations,
+                "品牌A",
+                ["新品A", "新品B"],
+                platforms=("美团", "饿了么"),
+            ),
+            {"新品B": "外卖无售"},
         )
 
     def test_product_menu_rejects_unknown_manual_status(self) -> None:
@@ -303,6 +334,77 @@ class DeliveryStatisticsTests(unittest.TestCase):
         self.assertEqual(len(jd_values), 1)
         self.assertEqual(mt_values[0][1], "商品名称")
         self.assertEqual(jd_values[0][1], "商品名称")
+
+    def test_end_to_end_generation_accepts_header_only_source_with_manual_no_sale_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "raw"
+            output_dir = root / "results"
+            input_dir.mkdir()
+
+            raw_wb = Workbook()
+            raw_wb.active.append(
+                ["平台", "品牌", "店铺名称", "分类描述", "宝贝名称", "原价", "现价", "宝贝月销", "抓取日期"]
+            )
+            raw_wb.save(input_dir / "品牌A 20261001外卖数据.xlsx")
+
+            annotation_wb = Workbook()
+            annotation_ws = annotation_wb.active
+            annotation_ws.append(["平台", "品牌", "产品", "近30日上新日期"])
+            for platform in ("京东秒送", "美团", "饿了么"):
+                annotation_ws.append([platform, "品牌A", "新品A", "外卖无售"])
+            annotation_path = root / "产品清单.xlsx"
+            annotation_wb.save(annotation_path)
+
+            outputs = generate_delivery_tables(
+                "test-record",
+                input_dir,
+                annotation_path,
+                output_dir,
+                brand="品牌A",
+                report_date=date(2026, 10, 1),
+                tracked_products=["新品A"],
+            )
+            output_names = {key: path.name for key, path in outputs.items()}
+            row_counts = {
+                key: load_workbook(path, read_only=True, data_only=True).active.max_row
+                for key, path in outputs.items()
+            }
+
+        self.assertEqual(
+            output_names,
+            {
+                "meituanData": "品牌A-20261001-美团.xlsx",
+                "elemeData": "品牌A-20261001-饿了么.xlsx",
+                "jdData": "品牌A-20261001-京东.xlsx",
+            },
+        )
+        self.assertEqual(row_counts, {"meituanData": 1, "elemeData": 1, "jdData": 1})
+
+    def test_end_to_end_generation_accepts_no_source_file_with_manual_no_sale_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "raw"
+            input_dir.mkdir()
+            annotation_wb = Workbook()
+            annotation_ws = annotation_wb.active
+            annotation_ws.append(["平台", "品牌", "产品", "近30日上新日期"])
+            for platform in ("京东秒送", "美团", "饿了么"):
+                annotation_ws.append([platform, "品牌A", "新品A", "外卖无售"])
+            annotation_path = root / "产品清单.xlsx"
+            annotation_wb.save(annotation_path)
+
+            outputs = generate_delivery_tables(
+                "test-record",
+                input_dir,
+                annotation_path,
+                root / "results",
+                brand="品牌A",
+                report_date=date(2026, 10, 1),
+                tracked_products=["新品A"],
+            )
+
+        self.assertEqual(set(outputs), {"meituanData", "elemeData", "jdData"})
 
     def test_end_to_end_generation_from_source_workbooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

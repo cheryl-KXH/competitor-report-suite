@@ -54,6 +54,21 @@ def _selector(config: dict[str, Any], tool_name: str) -> list[str]:
     return ["mcporter", "call", f"{server}.{tool_name}"]
 
 
+def mcporter_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    # mcporter 0.9.x force-exits after closing the MCP connection. When stdout
+    # is a pipe, that can discard buffered output and leave JSON cut mid-byte.
+    env["MCPORTER_NO_FORCE_EXIT"] = "1"
+    keep_alive_servers = {
+        name.strip()
+        for name in env.get("MCPORTER_KEEPALIVE", "").split(",")
+        if name.strip()
+    }
+    keep_alive_servers.add("dingtalk-ai-table")
+    env["MCPORTER_KEEPALIVE"] = ",".join(sorted(keep_alive_servers))
+    return env
+
+
 def parse_mcporter_json(stdout: str) -> dict[str, Any]:
     text = stdout.strip()
     if not text:
@@ -99,7 +114,15 @@ def call_table_tool(config: dict[str, Any], tool_name: str, payload: dict[str, A
     attempts = DATA_NOT_READY_ATTEMPTS if tool_name in RETRYABLE_TABLE_TOOLS else 1
     for attempt in range(attempts):
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=mcporter_subprocess_env(),
+            )
         except FileNotFoundError as exc:
             raise RuntimeError("找不到 mcporter，请先安装并配置 dingtalk-ai-table。") from exc
         if result.returncode != 0:

@@ -219,8 +219,6 @@ def render_price_html(value: str, wrap_after_slash: bool) -> str:
     text = clean_price_text(value)
     if wrap_after_slash and "/" in text:
         text = "/\n".join(split_outside_parentheses(text))
-    else:
-        text = insert_price_soft_breaks(text)
 
     escaped = html.escape(text, quote=True)
     pattern = re.compile(r"(?<=[(（])(\d+(?:\.\d+)?\s*元)(?=[)）])")
@@ -265,11 +263,7 @@ def safe_price_width_segments(text: str) -> list[str]:
     value = clean_price_text(text)
     if "/" in value:
         return price_blocks(value)
-    segments: list[str] = []
-    for block in price_blocks(value):
-        pieces = re.split(r"(?=[(（])|(?<=[)）])", block)
-        segments.extend(piece.strip() for piece in pieces if piece.strip())
-    return segments or [value]
+    return [value]
 
 
 def longest_ascii_token(text: str) -> str:
@@ -295,17 +289,7 @@ def estimate_price_lines(text: str, width_px: int, font_size_px: int) -> int:
             estimate_wrapped_lines(max(safe_price_width_segments(text), key=visual_len, default=""), width_px, font_size_px),
         )
 
-    capacity = max(1.0, (width_px - 8) / max(1, font_size_px))
-    lines = 1
-    current = ""
-    for piece in safe_price_width_segments(text):
-        candidate = f"{current}{piece}" if current else piece
-        if current and visual_len(candidate) > capacity:
-            lines += 1
-            current = piece
-        else:
-            current = candidate
-    return max(1, lines)
+    return 1
 
 
 SUMMARY_COLUMN_KEYS = ("brand", "count", "category", "productName", "launchDate", "price", "remark")
@@ -553,7 +537,7 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
 .brand-cell {{ white-space: normal; word-break: normal; overflow-wrap: normal; }}
 .product-name-cell {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
 .category-cell, .launch-date-cell {{ word-break: keep-all; }}
-.price-cell {{ word-break: keep-all; overflow-wrap: normal; }}
+.price-cell {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
 .remark-cell {{ word-break: normal; overflow-wrap: normal; white-space: normal; }}
 .brand-cell {{ background: #{colors['brandFill']}; font-weight: 700; }}
 .count-cell {{ font-weight: 700; font-size: 14px; }}
@@ -723,6 +707,17 @@ th, td {{ border: {border_width}px solid #{colors['black']}; text-align: center;
 """
 
 
+def constrain_output_image_height(image: Any, max_height_px: int) -> Any:
+    """Keep long PNGs below common image-preview/GPU texture limits."""
+    if max_height_px <= 0 or image.height <= max_height_px:
+        return image
+
+    from PIL import Image as PILImage
+
+    target_width = max(1, round(image.width * max_height_px / image.height))
+    return image.resize((target_width, max_height_px), PILImage.Resampling.LANCZOS)
+
+
 async def screenshot_html_with_playwright(html_path: Path, png_path: Path, image_layout: dict[str, Any]) -> None:
     from PIL import Image as PILImage
     from playwright.async_api import async_playwright
@@ -730,75 +725,88 @@ async def screenshot_html_with_playwright(html_path: Path, png_path: Path, image
     render_cfg = image_layout.get("render", {})
     width = int(image_layout.get("page", {}).get("widthPx", 640))
     scale = int(render_cfg.get("deviceScaleFactor", 2))
-    max_chunk_height = int(render_cfg.get("maxScreenshotChunkHeightPx", 4000))
+    max_chunk_height = max(1, int(render_cfg.get("maxScreenshotChunkHeightPx", 4000)))
+    max_output_height = int(render_cfg.get("maxOutputHeightPx", 16000))
     executable = render_cfg.get("chromeExecutable")
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             executable_path=executable if executable and Path(executable).exists() else None,
             headless=True,
         )
-        page = await browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=scale)
-        await page.goto(html_path.resolve().as_uri(), wait_until="load")
-        await page.evaluate("document.fonts && document.fonts.ready")
-        await page.wait_for_function(
-            "() => Array.from(document.images).every(img => img.complete)",
-            timeout=30000,
-        )
-        report_box = await page.locator(".report").evaluate(
-            """element => {
-                const rect = element.getBoundingClientRect();
-                return {
-                    x: rect.x,
-                    y: rect.y,
-                    width: Math.ceil(Math.max(element.scrollWidth, rect.width)),
-                    height: Math.ceil(Math.max(element.scrollHeight, rect.height))
-                };
-            }"""
-        )
-        await page.set_viewport_size({"width": int(report_box["width"]), "height": int(report_box["height"])})
-        report_height = int(report_box["height"])
-        if report_height <= max_chunk_height:
-            try:
-                await page.locator(".report").screenshot(path=str(png_path))
-            except Exception:
-                await page.screenshot(
-                    path=str(png_path),
-                    clip={
-                        "x": float(report_box["x"]),
-                        "y": float(report_box["y"]),
-                        "width": float(report_box["width"]),
-                        "height": float(report_box["height"]),
-                    },
-                )
-        else:
+        try:
+            page = await browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=scale)
+            await page.goto(html_path.resolve().as_uri(), wait_until="load")
+            await page.evaluate("document.fonts ? document.fonts.ready : Promise.resolve()")
+            await page.wait_for_function(
+                "() => Array.from(document.images).every(img => img.complete)",
+                timeout=30000,
+            )
+            await page.evaluate(
+                "() => Promise.all(Array.from(document.images, img => img.decode ? img.decode().catch(() => {}) : Promise.resolve()))"
+            )
+            report_box = await page.locator(".report").evaluate(
+                """element => {
+                    const rect = element.getBoundingClientRect();
+                    return {
+                        width: Math.ceil(Math.max(element.scrollWidth, rect.width)),
+                        height: Math.ceil(Math.max(element.scrollHeight, rect.height))
+                    };
+                }"""
+            )
+            report_width = int(report_box["width"])
+            report_height = int(report_box["height"])
+            await page.set_viewport_size({"width": report_width, "height": min(report_height, max_chunk_height)})
+
             chunks: list[PILImage.Image] = []
             y = 0
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_root = Path(temp_dir)
                 while y < report_height:
                     chunk_height = min(max_chunk_height, report_height - y)
-                    await page.set_viewport_size({"width": int(report_box["width"]), "height": chunk_height})
-                    await page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
+                    await page.set_viewport_size({"width": report_width, "height": chunk_height})
+                    actual_y = await page.evaluate(
+                        """async targetY => {
+                            window.scrollTo(0, targetY);
+                            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                            return window.scrollY;
+                        }""",
+                        y,
+                    )
+                    if abs(float(actual_y) - y) > 1:
+                        raise RuntimeError(f"周报截图滚动位置异常：期望 {y}px，实际 {actual_y}px")
                     chunk_path = temp_root / f"chunk_{len(chunks)}.png"
                     await page.screenshot(
                         path=str(chunk_path),
+                        animations="disabled",
                         clip={
                             "x": 0,
                             "y": 0,
-                            "width": float(report_box["width"]),
+                            "width": float(report_width),
                             "height": float(chunk_height),
                         },
                     )
-                    chunks.append(PILImage.open(chunk_path).copy())
+                    with PILImage.open(chunk_path) as chunk:
+                        chunks.append(chunk.convert("RGB"))
                     y += chunk_height
-            if chunks:
-                stitched = PILImage.new("RGB", (chunks[0].width, sum(chunk.height for chunk in chunks)), "white")
-                top = 0
-                for chunk in chunks:
-                    stitched.paste(chunk.convert("RGB"), (0, top))
-                    top += chunk.height
-                stitched.save(png_path)
-        await browser.close()
+
+            if not chunks:
+                raise RuntimeError("周报截图没有生成任何图像分片")
+
+            stitched = PILImage.new("RGB", (chunks[0].width, sum(chunk.height for chunk in chunks)), "white")
+            top = 0
+            for chunk in chunks:
+                if chunk.width != stitched.width:
+                    raise RuntimeError("周报截图分片宽度不一致")
+                stitched.paste(chunk, (0, top))
+                top += chunk.height
+
+            output_image = constrain_output_image_height(stitched, max_output_height)
+            output_image.save(png_path)
+            if output_image is not stitched:
+                output_image.close()
+            stitched.close()
+        finally:
+            await browser.close()
 
 
 def render_report_outputs(

@@ -23,12 +23,16 @@ from scripts.delivery.prepare_product_menu import (
     prepare_product_menu,
 )
 from scripts.delivery.processing import (
+    all_delivery_products_no_sale,
     find_delivery_rows,
+    has_delivery_sheet,
     jd_delivery_metrics,
+    normalize_product_key,
     platform_delivery_metrics,
     product_menu_launch_dates,
     read_annotation,
     tracked_product_statuses,
+    validate_empty_delivery_annotations,
 )
 from scripts.reporting.generate_report import generate_report
 from scripts.reporting.html import (
@@ -44,7 +48,7 @@ from scripts.social.processing import (
 )
 
 
-CONSUMER_FEEDBACK_TABLE_ID = "hvcu7Bw"
+CONSUMER_FEEDBACK_TABLE_ID = "cARtK3w"
 DELIVERY_OUTPUT_PLATFORMS = (
     ("meituanData", "美团"),
     ("elemeData", "饿了么"),
@@ -625,13 +629,12 @@ def _consumer_feedback_configs(configs: dict[str, dict[str, Any]]) -> dict[str, 
             "brand": {"fieldId": "01ZM8y7"},
             "productName": {"fieldId": "mHe1U1b"},
             "launchDate": {"fieldId": "mKUEya0"},
-            "day30": {"fieldId": "SSrz1N1"},
+            "day30": {"fieldId": "8dgeSOM"},
             "socialCleanedRawData": {
-                "fieldId": "Q4mbLWx",
+                "fieldId": "n9mBrWx",
                 "cellType": "attachment",
             },
-            "report": {"fieldId": "amWTton", "cellType": "link"},
-            "feedback": {"fieldId": "j8IgB7P"},
+            "report": {"fieldId": "amlWozg", "cellType": "link"},
         }
     }
     return scoped
@@ -849,19 +852,29 @@ def _prepare_delivery_run_inputs(
     auto_menu_callback=None,
 ) -> tuple[Path, Path, list[Any]]:
     delivery_dir = workspace / "delivery"
+    adjusted_value = record.cells.get("productMenu")
+    has_adjusted_menu = bool(_value_items(adjusted_value))
+    delivery_download_options = {"required": False} if has_adjusted_menu else {}
     delivery_path = _download_uploaded_xlsx(
-        configs, record, "deliveryData", "外卖数据", delivery_dir
+        configs,
+        record,
+        "deliveryData",
+        "外卖数据",
+        delivery_dir,
+        **delivery_download_options,
     )
-    assert delivery_path is not None
-    raw_rows = find_delivery_rows(delivery_dir)
-    if not raw_rows:
+    raw_rows = find_delivery_rows(delivery_dir) if delivery_path else []
+    if delivery_path and not raw_rows and not has_delivery_sheet(delivery_dir):
         raise RuntimeError("外卖数据附件中没有可识别的原始数据。")
+    if not raw_rows and not has_adjusted_menu:
+        raise RuntimeError(
+            "外卖数据为空或只有表头；请上传人工调整产品清单，并为每个关注新品在"
+            "美团、饿了么、京东分别标注“外卖无售”或“提前下架”。"
+        )
 
     if pre_annotation_callback:
         pre_annotation_callback()
 
-    adjusted_value = record.cells.get("productMenu")
-    has_adjusted_menu = bool(_value_items(adjusted_value))
     auto_annotation_path: Path | None = None
     if not has_adjusted_menu:
         if progress_callback:
@@ -888,6 +901,12 @@ def _prepare_delivery_run_inputs(
     else:
         assert auto_annotation_path is not None
         annotation_path = auto_annotation_path
+    if not raw_rows:
+        validate_empty_delivery_annotations(
+            read_annotation(annotation_path),
+            _task_brand(record),
+            _task_products(record),
+        )
     return delivery_dir, annotation_path, raw_rows
 
 
@@ -1093,6 +1112,9 @@ def run_generate_delivery_tables(record_id: str) -> dict[str, Any]:
                 input_dir,
                 annotation_path,
                 output_root(configs) / record_id / "delivery_tables",
+                brand=_task_brand(record),
+                report_date=_task_report_date(record),
+                tracked_products=_task_products(record),
             )
         empty_platforms = _empty_delivery_platforms(outputs)
         empty_keys = {
@@ -1149,19 +1171,6 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
         report_url = (
             dingtalk_docs.extract_link(report_value) if report_value else ""
         )
-        if delivery_only:
-            social_configs: dict[str, dict[str, Any]] = {}
-            social_matches: dict[
-                str, tuple[str, dingtalk_table.TaskRecord, date]
-            ] = {}
-        else:
-            social_configs = _consumer_feedback_configs(configs)
-            social_matches = _matching_social_records(
-                social_configs,
-                brand=brand,
-                report_date=report_date,
-                products=products,
-            )
         progress_callback("2/3 正在上传并回写原始文件")
         folder_name = (
             _delivery_task_folder_name(record)
@@ -1179,13 +1188,12 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
         )
 
         main_uploads: dict[str, tuple[str, str]] = {}
-        social_uploads: dict[str, dict[str, tuple[str, str]]] = {}
         archived_files: list[str] = []
         crawl_date = report_date
         with tempfile.TemporaryDirectory(prefix="feedback-finalize-") as tmp:
             workspace = Path(tmp)
             delivery_value = record.cells.get("deliveryData")
-            if not _has_dingtalk_node_link(delivery_value):
+            if _value_items(delivery_value) and not _has_dingtalk_node_link(delivery_value):
                 delivery_path = _download_uploaded_xlsx(
                     configs,
                     record,
@@ -1195,12 +1203,12 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
                 )
                 assert delivery_path is not None
                 raw_rows = find_delivery_rows(delivery_path.parent)
-                if not raw_rows:
+                if not raw_rows and not has_delivery_sheet(delivery_path.parent):
                     raise RuntimeError("外卖数据附件中没有可识别的原始数据。")
-                crawl_date = _crawl_date(raw_rows)
+                crawl_date = _crawl_date(raw_rows) if raw_rows else report_date
                 normalized = delivery_path.with_name(
                     safe_delivery_filename(
-                        f"{_primary_brand(raw_rows)}-{crawl_date:%Y%m%d}-外卖清洗数据.xlsx"
+                        f"{_primary_brand(raw_rows) if raw_rows else brand}-{crawl_date:%Y%m%d}-外卖清洗数据.xlsx"
                     )
                 )
                 if normalized != delivery_path:
@@ -1210,7 +1218,7 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
                 )
                 main_uploads["deliveryData"] = (normalized.name, url)
                 archived_files.append(normalized.name)
-            else:
+            elif _has_dingtalk_node_link(delivery_value):
                 current_name = _local_item_name(_value_items(delivery_value)[0])
                 match = re.search(r"(20\d{6})", current_name)
                 if match:
@@ -1241,37 +1249,9 @@ def run_finalize_report(record_id: str) -> dict[str, Any]:
                 main_uploads["productMenu"] = (normalized.name, url)
                 archived_files.append(normalized.name)
 
-            social_files = _collect_social_inputs(
-                social_configs,
-                social_matches,
-                workspace,
-                skip_archived=True,
-            )
-            field_key, _ = SOCIAL_INPUT_PLATFORMS[0]
-            for product_key, path in social_files.items():
-                product, social_record, _ = social_matches[product_key]
-                if _has_dingtalk_node_link(social_record.cells.get(field_key)):
-                    continue
-                normalized = path.with_name(
-                    _social_cleaned_input_filename(brand, product, report_date)
-                )
-                if normalized != path:
-                    shutil.copy2(path, normalized)
-                url = dingtalk_docs.upload_file(
-                    configs.get("dingtalk_docs", {}), normalized, folder_id
-                )
-                social_uploads.setdefault(social_record.record_id, {})[
-                    field_key
-                ] = (normalized.name, url)
-                archived_files.append(normalized.name)
-
         if main_uploads:
             dingtalk_table.update_attachment_fields(
                 configs, record_id, main_uploads
-            )
-        for social_record_id, links in social_uploads.items():
-            dingtalk_table.update_attachment_fields(
-                social_configs, social_record_id, links
             )
         message = "3/3 原始文件归档完成"
         if archived_files:
@@ -1356,16 +1336,37 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
             current_stage = "生成数表"
             progress_callback("4/6 正在进行外卖及社媒数据统计")
             annotations = read_annotation(annotation_path)
-            new_product_dates = product_menu_launch_dates(annotations, brand)
-            delivery_statuses = tracked_product_statuses(
+            hide_delivery_modules = all_delivery_products_no_sale(
                 annotations, brand, grouped_products
             )
+            new_product_dates = product_menu_launch_dates(annotations, brand)
+            delivery_statuses = tracked_product_statuses(
+                annotations,
+                brand,
+                grouped_products,
+                platforms=("美团", "饿了么"),
+            )
+            jd_early_delisted_keys = {
+                normalize_product_key(row.product)
+                for row in annotations
+                if row.manual_status == "提前下架"
+                and "京东" in row.platform
+                and (not row.brand or row.brand == brand)
+            }
+            jd_early_delisted_products = [
+                product
+                for product in grouped_products
+                if normalize_product_key(product) in jd_early_delisted_keys
+            ]
             meituan_metrics = platform_delivery_metrics(
                 raw_rows, annotations, "美团"
             )
             eleme_metrics = platform_delivery_metrics(
                 raw_rows, annotations, "饿了么"
             )
+            # A tracked product being delisted from JD does not mean the whole
+            # brand has no JD data. Keep the metrics for any other products so
+            # the JD workbook and report table can still be produced.
             jd_metrics = jd_delivery_metrics(raw_rows, annotations)
             delivery_model = delivery_report_from_metrics(
                 meituan_metrics, eleme_metrics, grouped_products
@@ -1376,6 +1377,9 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
                 input_dir,
                 annotation_path,
                 workspace / "outputs" / record_id / "delivery_tables",
+                brand=brand,
+                report_date=report_date,
+                tracked_products=grouped_products,
             )
             empty_platforms = _empty_delivery_platforms(delivery_outputs)
             delivery_links: dict[str, tuple[str, str]] = {}
@@ -1435,6 +1439,8 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
                 launch_dates=launch_dates,
                 new_product_dates=new_product_dates,
                 delivery_statuses=delivery_statuses,
+                jd_early_delisted_products=jd_early_delisted_products,
+                hide_delivery_modules=hide_delivery_modules,
                 configs=configs,
                 delivery_report=delivery_model,
                 jd_report=jd_model,
@@ -1445,13 +1451,19 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
             progress_callback("6/6 正在上传至钉钉文档")
             if not result.pdf_path or not result.pdf_path.is_file():
                 raise RuntimeError("报告生成未产生 PDF 文件。")
+            if not result.docx_path or not result.docx_path.is_file():
+                raise RuntimeError("报告生成未产生 Word 文件。")
             dingtalk_docs.upload_file(
                 configs.get("dingtalk_docs", {}), result.path, folder_id
+            )
+            dingtalk_docs.upload_file(
+                configs.get("dingtalk_docs", {}), result.docx_path, folder_id
             )
             url = dingtalk_docs.upload_file(
                 configs.get("dingtalk_docs", {}), result.pdf_path, folder_id
             )
             html_file_name = result.path.name
+            docx_file_name = result.docx_path.name
             output_file_name = result.pdf_path.name
         dingtalk_table.mark_links(
             configs,
@@ -1471,6 +1483,7 @@ def run_generate_report(record_id: str) -> dict[str, Any]:
             "output": None,
             "outputFile": output_file_name,
             "htmlFile": html_file_name,
+            "docxFile": docx_file_name,
             "url": url,
             "warnings": all_warnings,
         }

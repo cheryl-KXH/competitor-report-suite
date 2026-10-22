@@ -337,6 +337,21 @@ def mcporter_selector(dingtalk_cfg: dict[str, Any], tool_name: str) -> list[str]
     return ["mcporter", "call", f"{server}.{tool_name}"]
 
 
+def mcporter_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    # Let mcporter wait for the transport to finish writing the complete JSON
+    # response instead of forcing the process to exit while stdout is in flight.
+    env["MCPORTER_NO_FORCE_EXIT"] = "1"
+    keep_alive_servers = {
+        name.strip()
+        for name in env.get("MCPORTER_KEEPALIVE", "").split(",")
+        if name.strip()
+    }
+    keep_alive_servers.add("dingtalk-ai-table")
+    env["MCPORTER_KEEPALIVE"] = ",".join(sorted(keep_alive_servers))
+    return env
+
+
 def call_dingtalk_tool(dingtalk_cfg: dict[str, Any], tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     cmd = mcporter_selector(dingtalk_cfg, tool_name) + ["--args", json.dumps(payload, ensure_ascii=False)]
     retryable_tools = {"query_records", "update_records"}
@@ -345,7 +360,15 @@ def call_dingtalk_tool(dingtalk_cfg: dict[str, Any], tool_name: str, payload: di
     max_attempts = calc_not_ready_max_attempts if tool_name in retryable_tools else default_max_attempts
     for attempt in range(1, max_attempts + 1):
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=mcporter_subprocess_env(),
+            )
         except FileNotFoundError as exc:
             raise RuntimeError("找不到 mcporter，请先安装并配置钉钉 AI 表 MCP。") from exc
 
@@ -354,7 +377,65 @@ def call_dingtalk_tool(dingtalk_cfg: dict[str, Any], tool_name: str, payload: di
         try:
             data = parse_mcporter_json(result.stdout)
         except json.JSONDecodeError as exc:
+            if tool_name in retryable_tools and attempt < default_max_attempts:
+                print(
+                    f"WARNING: mcporter 返回了不完整 JSON，第 {attempt}/{default_max_attempts} 次，稍后重试",
+                    file=sys.stderr,
+                )
+                time.sleep(float(attempt))
+                continue
             raise RuntimeError(f"mcporter 返回不是 JSON：{result.stdout[:1000]}") from exc
+
+        if tool_name == "query_records" and "\ufffd" in result.stdout:
+            response_data = data.get("data", {}) if isinstance(data, dict) else {}
+            records = response_data.get("records", []) if isinstance(response_data, dict) else []
+            damaged_indexes = [
+                index
+                for index, record in enumerate(records or [])
+                if "\ufffd" in json.dumps(record, ensure_ascii=False)
+            ]
+            if damaged_indexes and not payload.get("recordIds"):
+                print(
+                    f"WARNING: mcporter 批量响应中有 {len(damaged_indexes)} 条记录包含损坏字符，正在逐条重新读取",
+                    file=sys.stderr,
+                )
+                for index in damaged_indexes:
+                    record_id = str(records[index].get("recordId") or "").strip()
+                    if not record_id:
+                        raise RuntimeError("mcporter 批量响应包含损坏字符，且无法定位对应记录。")
+                    repair_payload: dict[str, Any] = {
+                        "baseId": payload.get("baseId"),
+                        "tableId": payload.get("tableId"),
+                        "recordIds": [record_id],
+                    }
+                    if payload.get("fieldIds"):
+                        repair_payload["fieldIds"] = payload["fieldIds"]
+                    repaired = call_dingtalk_tool(
+                        dingtalk_cfg, "query_records", repair_payload
+                    )
+                    repaired_records = repaired.get("data", {}).get("records", []) or []
+                    replacement = next(
+                        (
+                            item
+                            for item in repaired_records
+                            if str(item.get("recordId") or "") == record_id
+                        ),
+                        None,
+                    )
+                    if replacement is None:
+                        raise RuntimeError(f"损坏记录 {record_id} 重新读取后未返回。")
+                    records[index] = replacement
+            elif attempt < default_max_attempts:
+                print(
+                    f"WARNING: mcporter 单条响应包含损坏的 UTF-8 字符，第 {attempt}/{default_max_attempts} 次，稍后重试",
+                    file=sys.stderr,
+                )
+                time.sleep(float(attempt))
+                continue
+            else:
+                raise RuntimeError(
+                    "mcporter 返回包含损坏的 UTF-8 字符，自动重试后仍无法安全读取。"
+                )
 
         failed = data.get("success") is False or data.get("status") not in (None, "success", "ok")
         if not failed:
@@ -872,19 +953,44 @@ def compute_category(values: dict[str, Any], rules: dict[str, Any]) -> str:
     return str(main or "")
 
 
-def truthy_return_status(value: Any, rule: dict[str, Any]) -> bool:
-    if isinstance(value, list):
-        return any(truthy_return_status(item, rule) for item in value)
-    if isinstance(value, bool):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return False
-    ignored = set(rule.get("ignoredValues", []))
-    truthy = set(rule.get("truthyValues", []))
-    if text in ignored:
-        return False
-    return text in truthy or rule.get("showValue", "回归") in text
+def return_status_labels(value: Any, rule: dict[str, Any]) -> list[str]:
+    raw_values: list[Any] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, list):
+            for nested in item:
+                collect(nested)
+            return
+        raw_values.append(item)
+
+    collect(value)
+    selected: set[str] = set()
+    truthy_values = set(rule.get("truthyValues", []))
+    truthy_label = rule.get("truthyLabel", "回归")
+    ignored_values = set(rule.get("ignoredValues", []))
+    for item in raw_values:
+        if isinstance(item, bool):
+            if item:
+                selected.add(truthy_label)
+            continue
+        text = str(item or "").strip()
+        if not text:
+            continue
+        for label in re.split(r"[,，、;/]+", text):
+            label = label.strip()
+            if not label or label in ignored_values:
+                continue
+            selected.add(truthy_label if label in truthy_values else label)
+
+    for preferred, suppressed in rule.get("suppressions", {}).items():
+        if preferred in selected:
+            selected.difference_update(suppressed)
+
+    return [
+        label
+        for label in rule.get("displayOrder", ["经典回归", "回归"])
+        if label in selected
+    ]
 
 
 def compute_remark(values: dict[str, Any], rules: dict[str, Any]) -> str:
@@ -892,8 +998,11 @@ def compute_remark(values: dict[str, Any], rules: dict[str, Any]) -> str:
     parts: list[str] = []
     for key in remark_rule.get("order", []):
         if key == "returnStatus":
-            if truthy_return_status(values.get(key), remark_rule.get("returnStatus", {})):
-                parts.append(remark_rule.get("returnStatus", {}).get("showValue", "回归"))
+            parts.extend(
+                return_status_labels(
+                    values.get(key), remark_rule.get("returnStatus", {})
+                )
+            )
         elif key == "collaboration":
             text = clean_text(str(values.get(key) or ""))
             if text:

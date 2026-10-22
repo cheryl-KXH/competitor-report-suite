@@ -128,6 +128,7 @@ class ReportBuildResult:
     path: Path
     warnings: tuple[str, ...]
     pdf_path: Path | None = None
+    docx_path: Path | None = None
 
 
 def _text(value: Any) -> str:
@@ -248,10 +249,6 @@ def delivery_report_from_metrics(
 
     meituan, meituan_stores = convert(meituan_metrics)
     eleme, eleme_stores = convert(eleme_metrics)
-    if not meituan:
-        raise RuntimeError("美团外卖数据没有有效商品。")
-    if not eleme:
-        raise RuntimeError("饿了么外卖数据没有有效商品。")
     return combine_delivery_models(
         meituan,
         eleme,
@@ -723,8 +720,18 @@ def _jd_html(
     rows: tuple[JdSale, ...],
     total_sales: float,
     tracked_products: list[str],
+    early_delisted_products: list[str] | None = None,
     new_product_dates: dict[str, date] | None = None,
 ) -> str:
+    early_delisted_note = ""
+    if early_delisted_products:
+        products_text = "、".join(early_delisted_products)
+        early_delisted_note = (
+            f'<p class="jd-missing-note">{_escape(brand)}{_escape(products_text)}'
+            "在京东外卖提前下架，销售数据暂无法获取。</p>"
+        )
+    if not rows and early_delisted_products:
+        return early_delisted_note
     if not rows:
         return f'<p class="jd-missing-note">{_escape(brand)}京东外卖销售数据暂无法获取。</p>'
     names = {normalize_product_key(row.product): row.product for row in rows}
@@ -755,6 +762,7 @@ def _jd_html(
 <tr><th class="rank-header">排名</th><th>商品名称</th><th>京东外卖销量</th><th>销量占比</th></tr></thead>
 <tbody>{body}</tbody></table></div>
 <p class="jd-note">注：<strong>京东外卖销量</strong>显示为“<strong>品牌全国门店总量</strong>”，而<strong>美团/饿了么</strong>的销量为“<strong>单店独立销量</strong>”。因统计口径差异，三者不可直接对比。</p>
+{early_delisted_note}
 """
 
 
@@ -804,11 +812,28 @@ def _social_detail_html(social: SocialReport | None) -> str:
     if not social:
         return '<p class="missing-note">消费者反馈详情暂无法获取。</p>'
 
-    total_value = _format_count(social.total_users) if social.total_users else ""
-    positive_user_value = _format_count(social.positive_users) if social.positive_users else ""
-    negative_user_value = _format_count(social.negative_users) if social.negative_users else ""
+    total_value = _format_count(social.total_users)
+    positive_user_value = _format_count(social.positive_users)
+    negative_user_value = _format_count(social.negative_users)
     rate_value = _format_positive_rate(social.positive_rate) if social.total_users else ""
     detail_rows: list[str] = []
+    overall_kpis = (
+        ("好评用户数", positive_user_value),
+        ("差评用户数", negative_user_value),
+    )
+    overall_kpi_index = 0
+
+    def next_overall_kpi_cells() -> str:
+        nonlocal overall_kpi_index
+        if overall_kpi_index >= len(overall_kpis):
+            return '<td class="kpi-spacer" colspan="2"></td>'
+        label, value = overall_kpis[overall_kpi_index]
+        overall_kpi_index += 1
+        return (
+            f'<th class="kpi-label">{label}</th>'
+            f'<td class="kpi-value">{value}</td>'
+        )
+
     colgroup = (
         '<colgroup><col class="positive-text"><col class="positive-count"><col class="negative-text">'
         '<col class="negative-count"><col class="kpi-label-column"><col class="kpi-value-column"></colgroup>'
@@ -825,7 +850,7 @@ def _social_detail_html(social: SocialReport | None) -> str:
         kpi_cells = (
             f'<th class="kpi-label">总计</th><td class="kpi-value">{total_value}</td>'
             if section_index == 0
-            else '<td class="kpi-spacer" colspan="2"></td>'
+            else next_overall_kpi_cells()
         )
         section_rows.append(
             f'<tr class="platform-header"><th class="detail-header">{_escape(section.label)}好评</th>'
@@ -834,8 +859,6 @@ def _social_detail_html(social: SocialReport | None) -> str:
             f'<th class="detail-header count-header">评论数</th>{kpi_cells}</tr>'
         )
         detail_count = max(len(section.positive_tags), len(section.negative_tags))
-        if section_index == 0:
-            detail_count = max(detail_count, 2)
 
         for index in range(detail_count):
             positive = section.positive_tags[index] if index < len(section.positive_tags) else ("", 0)
@@ -848,23 +871,14 @@ def _social_detail_html(social: SocialReport | None) -> str:
                     f'<td>{_escape(negative[0])}</td><td>{negative[1] if negative[0] else ""}</td>'
                 )
 
-            if section_index == 0 and index == 0:
-                detail_kpi_cells = (
-                    f'<th class="kpi-label">好评用户数</th><td class="kpi-value">{positive_user_value}</td>'
-                )
-            elif section_index == 0 and index == 1:
-                detail_kpi_cells = (
-                    f'<th class="kpi-label">差评用户数</th><td class="kpi-value">{negative_user_value}</td>'
-                )
-            else:
-                detail_kpi_cells = '<td class="kpi-spacer" colspan="2"></td>'
+            detail_kpi_cells = next_overall_kpi_cells()
             section_rows.append(
                 f'<tr>{detail_cells}{detail_kpi_cells}</tr>'
             )
         section_rows.append(
             f'<tr class="platform-total"><th>好评用户数</th><td>{section.positive_users}</td>'
             f'<th>差评用户数</th><td>{section.negative_users}</td>'
-            '<td class="kpi-spacer" colspan="2"></td></tr>'
+            f'{next_overall_kpi_cells()}</tr>'
         )
         detail_rows.extend(section_rows)
 
@@ -1018,10 +1032,13 @@ def build_report_html(
     jd_report: tuple[tuple[JdSale, ...], float] | None = None,
     social_report_models: dict[str, SocialReport] | None = None,
     delivery_statuses: dict[str, str] | None = None,
+    jd_early_delisted_products: list[str] | None = None,
+    hide_delivery_modules: bool = False,
     new_product_dates: dict[str, date] | None = None,
 ) -> ReportBuildResult:
     warnings: list[str] = []
     delivery_statuses = delivery_statuses or {}
+    jd_early_delisted_products = jd_early_delisted_products or []
     new_product_dates = new_product_dates or {}
     if delivery_report is None:
         if not meituan_path or not eleme_path:
@@ -1100,17 +1117,17 @@ def build_report_html(
         launch_text = f"{launch_values[0].month}.{launch_values[0].day} "
     intro_rows: list[str] = []
     for product in ordered_products:
-        delivery_status = delivery_statuses.get(product)
-        if delivery_status:
-            intro_rows.append(
-                f'<li><strong>{_escape(product)}</strong>：{_escape(delivery_status)}，暂无月销数据</li>'
-            )
-            continue
         sale = delivery.tracked_rows.get(product)
         if sale:
             intro_rows.append(
                 f'<li><strong>{_escape(product)}</strong>：销量排名第 {sale.rank}，线上外卖日店均 '
                 f'{_format_daily(sale.combined_daily)} 杯，销量占比 {_format_percent(sale.share)}</li>'
+            )
+            continue
+        delivery_status = delivery_statuses.get(product)
+        if delivery_status:
+            intro_rows.append(
+                f'<li><strong>{_escape(product)}</strong>：{_escape(delivery_status)}，暂无月销数据</li>'
             )
         else:
             warnings.append(f"{product}：未在美团和饿了么外卖数表中匹配到对应商品")
@@ -1123,6 +1140,14 @@ def build_report_html(
     border_width = tables.get("borderWidthPx", 0.5)
     detail_line_height = tables.get("detailLineHeightPx", tables.get("lineHeightPx", 20))
     mobile_zoom_script = _mobile_zoom_script(page_width)
+    delivery_modules_html = ""
+    if not hide_delivery_modules:
+        delivery_modules_html = (
+            f'<div class="pdf-keep-together sales-module">'
+            f'{_delivery_html(brand, delivery, ordered_products, new_product_dates)}</div>'
+            f'<div class="pdf-keep-together jd-module">'
+            f'{_jd_html(brand, jd_rows, jd_total, ordered_products, jd_early_delisted_products, new_product_dates)}</div>'
+        )
     css = f"""
 {font_css}
 *{{box-sizing:border-box}}
@@ -1170,8 +1195,7 @@ thead th,.platform-header .detail-header,.feedback-title-cell{{background:#{colo
 <body><div class="report-viewport"><div class="report-scale"><main class="report">{logo_html}<h1>{_escape(title_text)}</h1>
 <div class="pdf-keep-together report-intro-module"><p class="lead"><strong>以下是{_escape(brand)} {launch_text}新品30日销量表现及消费者评论情况：</strong></p>
 <ul class="sales-summary">{''.join(intro_rows)}</ul></div>
-<div class="pdf-keep-together sales-module">{_delivery_html(brand, delivery, ordered_products, new_product_dates)}</div>
-<div class="pdf-keep-together jd-module">{_jd_html(brand, jd_rows, jd_total, ordered_products, new_product_dates)}</div>{''.join(product_sections)}
+{delivery_modules_html}{''.join(product_sections)}
 </main></div></div>{mobile_zoom_script}</body></html>"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,11 +15,13 @@ from service.jobs import (
     run_generate_report,
     run_prepare_product_menu,
 )
-from service.schemas import AcceptedResponse, FinalizeResponse, HealthResponse
+from service.schemas import AcceptedResponse, HealthResponse
 
 
 app = FastAPI(title="Product Feedback Report Service")
 executor = ThreadPoolExecutor(max_workers=2)
+_finalize_lock = Lock()
+_active_finalize_records: set[str] = set()
 
 
 def require_secret(secret: str | None) -> None:
@@ -73,6 +75,25 @@ def _submit(fn, record_id: str) -> None:
     executor.submit(run)
 
 
+def _submit_finalize(record_id: str) -> bool:
+    with _finalize_lock:
+        if record_id in _active_finalize_records:
+            return False
+        _active_finalize_records.add(record_id)
+
+    def run() -> None:
+        try:
+            print(run_finalize_report(record_id))
+        except Exception as exc:
+            print(f"finalize job failed for {record_id}: {type(exc).__name__}: {exc}")
+        finally:
+            with _finalize_lock:
+                _active_finalize_records.discard(record_id)
+
+    executor.submit(run)
+    return True
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(ok=True)
@@ -102,12 +123,15 @@ async def generate_report(request: Request) -> AcceptedResponse:
     return AcceptedResponse(ok=True, status="accepted", recordId=record_id, message="报告生成任务已接收。")
 
 
-@app.post("/finalize-report", response_model=FinalizeResponse)
-async def finalize_report(request: Request) -> FinalizeResponse:
+@app.post("/finalize-report", response_model=AcceptedResponse)
+async def finalize_report(request: Request) -> AcceptedResponse:
     record_id, secret = await parse_request(request)
     require_secret(secret)
-    try:
-        result = await asyncio.to_thread(run_finalize_report, record_id)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return FinalizeResponse(**result)
+    submitted = _submit_finalize(record_id)
+    message = "文件归档任务已接收。" if submitted else "文件归档任务正在执行，请勿重复提交。"
+    return AcceptedResponse(
+        ok=True,
+        status="accepted" if submitted else "running",
+        recordId=record_id,
+        message=message,
+    )

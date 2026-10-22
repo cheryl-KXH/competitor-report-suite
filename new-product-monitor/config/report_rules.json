@@ -48,7 +48,8 @@
     "高山3班",
     "ops",
     "泰柯茶园",
-    "唐沫茶兮"
+    "唐沫茶兮",
+    "楼下酸奶"
   ],
   "recordFilter": {
     "dateField": "launchDate",
@@ -95,10 +96,10 @@
     }
   },
   "categoryRule": {
-    "description": "品类只显示一个。优先级：茶特调 > 果蔬茶 > 柠檬茶 > 酒元素 > 主品类。",
+    "description": "品类只显示一个。优先级：茶特调 > 果蔬茶 > 果蔬奶 >柠檬茶 > 酒元素 > 主品类。",
     "additionalField": "additionalCategory",
     "mainField": "mainCategory",
-    "priority": ["茶特调", "果蔬茶", "柠檬茶", "酒元素"],
+    "priority": ["茶特调", "果蔬茶", "柠檬茶", "酒元素", "果蔬奶"],
     "fallback": "mainCategory",
     "separator": "、"
   },
@@ -107,9 +108,13 @@
     "separator": "，",
     "emptyText": "/",
     "returnStatus": {
-      "showValue": "回归",
-      "truthyValues": ["回归", "是", "true", "TRUE", "1"],
-      "ignoredValues": ["上新", "否", "false", "FALSE", "0"]
+      "displayOrder": ["经典回归", "回归"],
+      "truthyValues": ["是", "true", "TRUE", "1"],
+      "truthyLabel": "回归",
+      "ignoredValues": ["上新", "系列上新", "否", "false", "FALSE", "0"],
+      "suppressions": {
+        "经典回归": ["回归"]
+      }
     },
     "collaboration": {
       "suffix": "联名"

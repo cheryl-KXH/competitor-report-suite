@@ -79,6 +79,43 @@ class ReportingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "匹配到多个外卖商品"):
                 combine_delivery_sales(mt, elm, ["新品"])
 
+    def test_delivery_model_accepts_all_platforms_empty(self) -> None:
+        report = delivery_report_from_metrics([], [], ["新品A"])
+
+        self.assertEqual(report.all_rows, ())
+        self.assertEqual(report.tracked_rows, {})
+        self.assertEqual(report.meituan_total_daily, 0)
+        self.assertEqual(report.eleme_total_daily, 0)
+
+    def test_html_describes_manual_no_sale_when_delivery_is_empty(self) -> None:
+        delivery = delivery_report_from_metrics([], [], ["新品A"])
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "报告.html"
+            build_report_html(
+                title="报告",
+                brand="品牌A",
+                products=["新品A"],
+                report_date=date(2026, 10, 1),
+                meituan_path=None,
+                eleme_path=None,
+                jd_path=None,
+                social_paths={},
+                product_infos={"新品A": ProductInfo("新品A")},
+                launch_dates={},
+                output_path=output,
+                configs={},
+                delivery_report=delivery,
+                jd_report=((), 0.0),
+                delivery_statuses={"新品A": "外卖无售"},
+                hide_delivery_modules=True,
+            )
+            document = output.read_text(encoding="utf-8")
+
+        self.assertIn("<strong>新品A</strong>：外卖无售，暂无月销数据", document)
+        self.assertNotIn('class="pdf-keep-together sales-module"', document)
+        self.assertNotIn('class="pdf-keep-together jd-module"', document)
+        self.assertIn('class="pdf-keep-together product-info-module"', document)
+
     def test_jd_model_keeps_all_rows_and_total_uses_all_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self._jd_workbook(Path(tmp) / "京东.xlsx")
@@ -102,6 +139,66 @@ class ReportingTests(unittest.TestCase):
             document,
         )
         self.assertLess(document.index(">商品20</td>"), document.index(">瓶子龙眼椰</td>"))
+
+    def test_jd_html_keeps_table_when_only_one_tracked_product_is_delisted(self) -> None:
+        rows, total = jd_report_from_metrics(
+            [
+                {"product": "苹果碰", "sales": 8},
+                {"product": "其他商品", "sales": 12},
+            ]
+        )
+
+        document = _jd_html(
+            "瑞幸",
+            rows,
+            total,
+            ["苹果碰", "虎斑橘"],
+            ["虎斑橘"],
+        )
+
+        self.assertIn("瑞幸 京东外卖销量表现", document)
+        self.assertIn('<tr class="tracked-row"><td class="rank-cell">2</td><td>苹果碰</td>', document)
+        self.assertIn("瑞幸虎斑橘在京东外卖提前下架，销售数据暂无法获取。", document)
+
+    def test_jd_html_uses_delisted_note_when_no_jd_rows_exist(self) -> None:
+        document = _jd_html("瑞幸", (), 0, ["虎斑橘"], ["虎斑橘"])
+
+        self.assertIn("瑞幸虎斑橘在京东外卖提前下架，销售数据暂无法获取。", document)
+        self.assertNotIn("京东外卖销量表现", document)
+
+    def test_report_keeps_jd_table_when_another_tracked_product_is_delisted(self) -> None:
+        delivery = delivery_report_from_metrics(
+            [{"product": "苹果碰", "daily_store_avg": 0.5, "sales": 15, "stores": 2}],
+            [{"product": "苹果碰", "daily_store_avg": 0.3, "sales": 9, "stores": 2}],
+            ["苹果碰", "虎斑橘"],
+        )
+        jd = jd_report_from_metrics([{"product": "苹果碰", "sales": 8}])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "报告.html"
+            build_report_html(
+                title="报告",
+                brand="瑞幸",
+                products=["苹果碰", "虎斑橘"],
+                report_date=date(2026, 9, 28),
+                meituan_path=None,
+                eleme_path=None,
+                jd_path=None,
+                social_paths={},
+                product_infos={},
+                launch_dates={},
+                output_path=output,
+                configs={"html_layout": {}, "font_files": {}},
+                delivery_report=delivery,
+                jd_report=jd,
+                delivery_statuses={"虎斑橘": "提前下架"},
+                jd_early_delisted_products=["虎斑橘"],
+            )
+            document = output.read_text(encoding="utf-8")
+
+        self.assertIn("瑞幸 京东外卖销量表现", document)
+        self.assertIn('<tr class="tracked-row"><td class="rank-cell">1</td><td>苹果碰</td>', document)
+        self.assertIn("瑞幸虎斑橘在京东外卖提前下架", document)
 
     def test_social_parser_aggregates_summary_and_keeps_empty_platforms_blank(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -478,8 +575,8 @@ class ReportingTests(unittest.TestCase):
             )
             document = output.read_text(encoding="utf-8")
         self.assertIn("新品30日销量表现及消费者评论情况", document)
-        self.assertIn("<strong>新品</strong>：提前下架，暂无月销数据。", document)
-        self.assertNotIn("<strong>新品</strong>：销量排名第", document)
+        self.assertNotIn("<strong>新品</strong>：提前下架", document)
+        self.assertIn("<strong>新品</strong>：销量排名第 1", document)
         self.assertNotIn("新品销量表现（30日）", document)
         self.assertIn("新品 6.18-7.18 第三方平台评价反馈", document)
         self.assertNotIn("品牌-新品 消费者反馈", document)
